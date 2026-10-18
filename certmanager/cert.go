@@ -18,10 +18,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SnishaperTeam/snishaper-core/config"
 	"github.com/SnishaperTeam/snishaper-core/internal/openutil"
 )
 
-// CertManager manages the SniShaper CA certificate and key used to sign MITM certificates.
+// CertManager manages the embedding application's CA certificate and key used
+// to sign MITM certificates.
 type CertManager struct {
 	caCert  *x509.Certificate
 	caKey   *rsa.PrivateKey
@@ -32,14 +34,65 @@ type CertManager struct {
 	// Cache for CA install status to avoid expensive PowerShell calls
 	lastStatus CAInstallStatus
 	lastCheck  time.Time
+
+	// brand 决定 CA 主题与信任库中"哪些证书属于本应用"的判定。
+	brand config.Brand
 }
 
-// NewCertManager creates a CertManager reading and writing the CA at the given paths.
+// NewCertManager creates a CertManager reading and writing the CA at the given
+// paths, using the reference product's name in the CA subject.
 func NewCertManager(caPath, keyPath string) *CertManager {
+	return NewCertManagerFor(config.Brand{}, caPath, keyPath)
+}
+
+// NewCertManagerFor creates a CertManager whose CA carries the given brand.
+// The brand appears in the certificate subject ("<Product>" organization,
+// "<Product> CA" common name) and in the trust-store search that recognises the
+// CA as ours.
+func NewCertManagerFor(brand config.Brand, caPath, keyPath string) *CertManager {
 	return &CertManager{
 		caPath:  caPath,
 		keyPath: keyPath,
+		brand:   brand.Resolve(),
 	}
+}
+
+// Brand returns the product identity this manager signs certificates for.
+func (cm *CertManager) Brand() config.Brand { return cm.brand }
+
+// caAnchorFileNameFor returns the anchor file name for a product, e.g.
+// "snishaper-ca.crt" / "flowweaver-ca.crt". Keeping it brand-specific stops two
+// embedders from overwriting (and later uninstalling) one another's anchor.
+func caAnchorFileNameFor(brand config.Brand) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(brand.Display()) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			// Spaces, punctuation and non-ASCII characters cannot appear in a
+			// trust-store file name.
+			b.WriteByte('-')
+		}
+	}
+	safe := strings.Trim(b.String(), "-")
+	if safe == "" {
+		safe = "root"
+	}
+	return safe + "-ca.crt"
+}
+
+// matchesBrandText reports whether text carries this application's product
+// name. Matching uses only the product name (never a shared driver string), so
+// certificates belonging to other tools are never claimed as ours.
+func matchesBrandText(brand config.Brand, text string) bool {
+	lowered := strings.ToLower(text)
+	for _, token := range brand.OwnNames() {
+		if token != "" && strings.Contains(lowered, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func (cm *CertManager) generateCAUnlocked() error {
@@ -48,11 +101,12 @@ func (cm *CertManager) generateCAUnlocked() error {
 		return fmt.Errorf("failed to generate CA private key: %w", err)
 	}
 
+	name := cm.brand.Display()
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			Organization: []string{"SniShaper"},
-			CommonName:   "SniShaper CA",
+			Organization: []string{name},
+			CommonName:   name + " CA",
 		},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
@@ -211,7 +265,7 @@ func (cm *CertManager) GetCAInstallStatus() CAInstallStatus {
 	status := CAInstallStatus{
 		CertPath:    cm.caPath,
 		Platform:    runtime.GOOS,
-		InstallHelp: platformInstallHelp(),
+		InstallHelp: platformInstallHelp(cm.brand),
 	}
 
 	if cm.caCert == nil {
@@ -223,7 +277,7 @@ func (cm *CertManager) GetCAInstallStatus() CAInstallStatus {
 		return status
 	}
 
-	status.Installed = platformCACertInstalled(certThumbprint(cm.caCert))
+	status.Installed = platformCACertInstalled(cm.brand, certThumbprint(cm.caCert))
 
 	// Update cache
 	cm.certMu.Lock()
@@ -259,7 +313,7 @@ func (cm *CertManager) InstallCA() error {
 		}
 	}
 
-	if err := platformInstallCA(cm.caPath); err != nil {
+	if err := platformInstallCA(cm.brand, cm.caPath); err != nil {
 		return err
 	}
 
@@ -282,7 +336,7 @@ type InstalledCert struct {
 // GetInstalledCertificates lists the certificates this app owns in the platform
 // trust store.
 func (cm *CertManager) GetInstalledCertificates() ([]InstalledCert, error) {
-	return platformListCerts()
+	return platformListCerts(cm.brand)
 }
 
 // UninstallCertificate removes a previously installed certificate by thumbprint or store token.
@@ -300,7 +354,7 @@ func (cm *CertManager) UninstallCertificate(thumbprint string) error {
 		certThumbprint = parts[2]
 	}
 
-	if err := platformUninstallCert(storeLocation, storeName, certThumbprint); err != nil {
+	if err := platformUninstallCert(cm.brand, storeLocation, storeName, certThumbprint); err != nil {
 		return err
 	}
 
@@ -369,11 +423,20 @@ func (cm *CertManager) ExportCert() ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cm.caCert.Raw}), nil
 }
 
-// InitCertManager loads or creates the CA in certDir and returns a ready CertManager.
+// InitCertManager loads or creates the CA in certDir and returns a ready
+// CertManager for the reference product.
 func InitCertManager(certDir string) (*CertManager, error) {
+	return InitCertManagerFor(config.Brand{}, certDir)
+}
+
+// InitCertManagerFor loads or creates the CA in certDir for the given brand.
+// The brand decides the CA subject, so each application installs a
+// recognisably-named root instead of sharing (and uninstalling) one another's.
+func InitCertManagerFor(brand config.Brand, certDir string) (*CertManager, error) {
 	os.MkdirAll(certDir, 0755)
 
-	cm := NewCertManager(
+	cm := NewCertManagerFor(
+		brand,
 		filepath.Join(certDir, "ca.crt"),
 		filepath.Join(certDir, "ca.key"),
 	)

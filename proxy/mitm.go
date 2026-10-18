@@ -234,7 +234,7 @@ func (p *ProxyServer) generateCert(host string, caCert *x509.Certificate, caKey 
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization: []string{"SniShaper"},
+			Organization: []string{p.brand.Display()},
 			CommonName:   host,
 		},
 		NotBefore: time.Now().Add(-24 * time.Hour),

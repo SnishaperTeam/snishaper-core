@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/SnishaperTeam/snishaper-core/config"
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
 	"github.com/SnishaperTeam/snishaper-core/log"
 	"github.com/SnishaperTeam/snishaper-core/subscription"
@@ -53,7 +54,9 @@ type RuleManager struct {
 	rulesHash            string
 	logger               log.Logger
 	routerDebug          bool
-	domainRegexCache     sync.Map
+	// brand 标识嵌入方产品名，决定 TUN 网卡默认名等用户可见标识。
+	brand            config.Brand
+	domainRegexCache sync.Map
 
 	subscriptions     *subscription.Store
 	builtinSiteGroups []SiteGroup
@@ -315,7 +318,7 @@ func (rm *RuleManager) applySettingsDefaults() {
 	if rm.listenPort == "" {
 		rm.listenPort = "8080"
 	}
-	rm.tunConfig = normalizeTUNConfig(rm.tunConfig)
+	rm.tunConfig = normalizeTUNConfig(rm.tunConfig, rm.brand)
 }
 
 func (rm *RuleManager) loadSettingsConfig() error {
@@ -567,7 +570,7 @@ func (rm *RuleManager) GetCloudflareConfig() CloudflareConfig {
 func (rm *RuleManager) GetTUNConfig() TUNConfig {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	return normalizeTUNConfig(rm.tunConfig)
+	return normalizeTUNConfig(rm.tunConfig, rm.brand)
 }
 
 // GetCloseToTray 返回关闭窗口时是否最小化到托盘。
@@ -761,7 +764,7 @@ func (rm *RuleManager) UpdateCloudflareConfig(cfg CloudflareConfig) error {
 // UpdateTUNConfig 更新 TUN 配置。
 func (rm *RuleManager) UpdateTUNConfig(cfg TUNConfig) error {
 	rm.mu.Lock()
-	rm.tunConfig = normalizeTUNConfig(cfg)
+	rm.tunConfig = normalizeTUNConfig(cfg, rm.brand)
 	rm.mu.Unlock()
 	return rm.saveSettingsConfig()
 }
@@ -953,7 +956,7 @@ func (rm *RuleManager) saveSettingsConfig() error {
 	autoUpdateRules := rm.autoUpdateRules
 	migrationEnabled := rm.migrationEnabled
 	cloudflareConfig := rm.cloudflareConfig
-	tunConfig := normalizeTUNConfig(rm.tunConfig)
+	tunConfig := normalizeTUNConfig(rm.tunConfig, rm.brand)
 	fragConfig := normalizeFragmentConfig(rm.fragConfig)
 
 	settings := SettingsConfig{

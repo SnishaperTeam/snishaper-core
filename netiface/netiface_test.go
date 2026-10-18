@@ -3,6 +3,8 @@ package netiface
 import (
 	"net/netip"
 	"testing"
+
+	"github.com/SnishaperTeam/snishaper-core/config"
 )
 
 // TestCollectPrefersDefaultRouteOverEnumerationOrder is the regression test for
@@ -145,7 +147,7 @@ func TestExcludeAndForceInterface(t *testing.T) {
 // TestIsOwnTunnelMatchesWholeNames guards against substring matching, which
 // would misclassify unrelated adapters.
 func TestIsOwnTunnelMatchesWholeNames(t *testing.T) {
-	for _, name := range []string{"SniShaper", "snishaper", "singtun", "sing-tun", "SniShaper2"} {
+	for _, name := range []string{"SniShaper", "snishaper", "sni-shaper", "singtun", "sing-tun", "SniShaper2"} {
 		if !IsOwnTunnel(name) {
 			t.Errorf("IsOwnTunnel(%q) = false, want true", name)
 		}
@@ -153,6 +155,42 @@ func TestIsOwnTunnelMatchesWholeNames(t *testing.T) {
 	for _, name := range []string{"WLAN", "Ethernet", "Tundra", "SetupVPN", "tun"} {
 		if IsOwnTunnel(name) {
 			t.Errorf("IsOwnTunnel(%q) = true, want false", name)
+		}
+	}
+}
+
+// TestIsOwnTunnelOfBrand covers the embedder-branded variant: each application
+// recognises its own adapter (including the dashed and numbered forms) without
+// hijacking another product's.
+func TestIsOwnTunnelOfBrand(t *testing.T) {
+	flowweaver := config.Brand{Name: "FlowWeaver"}
+	for _, name := range []string{"FlowWeaver", "flowweaver", "flow-weaver", "FlowWeaver2", "singtun"} {
+		if !IsOwnTunnelOf(flowweaver, name) {
+			t.Errorf("IsOwnTunnelOf(FlowWeaver, %q) = false, want true", name)
+		}
+	}
+	// The reference product's adapter is still ours in spirit (shared sing-tun
+	// names aside), but a branded selection must not borrow the other product's
+	// plain name: that adapter belongs to a different install.
+	for _, name := range []string{"WLAN", "Ethernet", "Tundra"} {
+		if IsOwnTunnelOf(flowweaver, name) {
+			t.Errorf("IsOwnTunnelOf(FlowWeaver, %q) = true, want false", name)
+		}
+	}
+}
+
+// TestDashedBrandName pins the CamelCase-to-dashed conversion used for adapter
+// aliases.
+func TestDashedBrandName(t *testing.T) {
+	cases := map[string]string{
+		"SniShaper":  "sni-shaper",
+		"FlowWeaver": "flow-weaver",
+		"snishaper":  "snishaper",
+		"":           "",
+	}
+	for in, want := range cases {
+		if got := config.Dashed(in); got != want {
+			t.Errorf("Dashed(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -185,7 +223,7 @@ func TestBuiltinBlacklistExcludesVirtualNICs(t *testing.T) {
 		"flannel.1", "cali0", "weave", "dummy0", "ifb0", "ip6tnl0",
 	}
 	for _, name := range blacklisted {
-		if !isDefaultExcluded(name) {
+		if !isDefaultExcluded(config.Brand{}, name) {
 			t.Errorf("isDefaultExcluded(%q) = false, want true", name)
 		}
 	}
@@ -195,7 +233,7 @@ func TestBuiltinBlacklistExcludesVirtualNICs(t *testing.T) {
 		if name == "tailscale0" {
 			continue
 		}
-		if isDefaultExcluded(name) {
+		if isDefaultExcluded(config.Brand{}, name) {
 			t.Errorf("isDefaultExcluded(%q) = true, want false", name)
 		}
 	}

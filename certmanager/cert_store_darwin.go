@@ -10,18 +10,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/SnishaperTeam/snishaper-core/config"
 )
 
 // macOS trust store: the CA is added to the login keychain with the security
 // CLI, which asks the user for authorisation through the usual keychain prompt.
 // The System keychain is only read, because writing to it needs root.
 
-func platformInstallHelp() string {
+func platformInstallHelp(_ config.Brand) string {
 	return "安装时会在钥匙串中请求授权；也可用\"钥匙串访问\"手动导入 CA 并把信任设置为\"始终信任\""
 }
 
-func platformCACertInstalled(thumbprint string) bool {
-	certs, err := collectCACerts()
+func platformCACertInstalled(brand config.Brand, thumbprint string) bool {
+	certs, err := collectCACerts(brand)
 	if err != nil {
 		return false
 	}
@@ -33,15 +35,15 @@ func platformCACertInstalled(thumbprint string) bool {
 	return false
 }
 
-func platformListCerts() ([]InstalledCert, error) {
-	certs, err := collectCACerts()
+func platformListCerts(brand config.Brand) ([]InstalledCert, error) {
+	certs, err := collectCACerts(brand)
 	if err != nil {
 		return nil, err
 	}
 
 	result := []InstalledCert{}
 	for _, cert := range certs {
-		if !isSniShaperCert(cert.Cert) {
+		if !isOwnCert(brand, cert.Cert) {
 			continue
 		}
 		result = append(result, InstalledCert{
@@ -56,7 +58,7 @@ func platformListCerts() ([]InstalledCert, error) {
 	return result, nil
 }
 
-func platformInstallCA(caPath string) error {
+func platformInstallCA(_ config.Brand, caPath string) error {
 	keychain := loginKeychainPath()
 	if keychain == "" {
 		return errors.New("login keychain not found")
@@ -73,7 +75,7 @@ func platformInstallCA(caPath string) error {
 	return nil
 }
 
-func platformUninstallCert(storeLocation, _, thumbprint string) error {
+func platformUninstallCert(_ config.Brand, storeLocation, _, thumbprint string) error {
 	keychains := []string{loginKeychainPath()}
 	if strings.EqualFold(storeLocation, "LocalMachine") {
 		keychains = []string{systemKeychainPath()}
@@ -111,7 +113,7 @@ type systemCert struct {
 	StoreLocation string
 }
 
-func collectCACerts() ([]systemCert, error) {
+func collectCACerts(brand config.Brand) ([]systemCert, error) {
 	keychains := []struct {
 		path          string
 		storeName     string
@@ -169,14 +171,25 @@ func collectCACerts() ([]systemCert, error) {
 	return result, nil
 }
 
-func isSniShaperCert(cert *x509.Certificate) bool {
+// isOwnCert reports whether cert was issued by this application's CA: its
+// subject or issuer carries the product name. Matching is restricted to the
+// brand (see config.Brand.OwnNames) so one application never lists — or
+// uninstalls — another's root.
+func isOwnCert(brand config.Brand, cert *x509.Certificate) bool {
 	if cert == nil {
 		return false
 	}
-	if strings.Contains(strings.ToLower(cert.Subject.String()), "snishaper") {
-		return true
+	subject := strings.ToLower(cert.Subject.String())
+	issuer := strings.ToLower(cert.Issuer.String())
+	for _, token := range brand.OwnNames() {
+		if token == "" {
+			continue
+		}
+		if strings.Contains(subject, token) || strings.Contains(issuer, token) {
+			return true
+		}
 	}
-	return strings.Contains(strings.ToLower(cert.Issuer.String()), "snishaper")
+	return false
 }
 
 func loginKeychainPath() string {

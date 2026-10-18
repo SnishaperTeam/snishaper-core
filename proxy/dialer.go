@@ -877,7 +877,7 @@ func (p *ProxyServer) refreshECHFromDNS(host string, rule Rule) []byte {
 				if n.Enabled && n.URL != "" {
 					directCtx, directCancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer directCancel()
-					if ech, fetchErr := fetchECHDirect(directCtx, lookupDomain, n.URL); fetchErr == nil && len(ech) > 0 {
+					if ech, fetchErr := fetchECHDirect(directCtx, lookupDomain, n.URL, p.brand); fetchErr == nil && len(ech) > 0 {
 						p.tracef("[Upstream] ECH DNS refresh success via direct %s for %s (%d bytes)", n.URL, host, len(ech))
 						p.applyECHConfig(host, rule, ech, "dns-refresh-direct")
 						return ech

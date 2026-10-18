@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/SnishaperTeam/snishaper-core/config"
 )
 
 // Address families accepted by Select.
@@ -48,21 +50,19 @@ func FamilyOf(addr string) int {
 	return FamilyIPv6
 }
 
-// tunPrefixes are the address ranges SniShaper assigns to its own TUN device.
+// tunPrefixes are the address ranges this library assigns to its own TUN device.
 // An address inside them is never a valid outbound source.
 var tunPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("198.18.0.0/15"),
 	netip.MustParsePrefix("fd65:198:18::/64"),
 }
 
-// tunNames are the interface names SniShaper gives its own devices. Matching
-// is exact-ish: a name that merely contains one of these as a substring of a
-// longer word (for example "Tundra" or "SetupVPN") is not treated as the TUN.
-var tunNames = []string{
-	"snishaper",
-	"sni-shaper",
-	"singtun",
-	"sing-tun",
+// ownTunnelNames returns the interface names the embedder's product gives its
+// own TUN devices. Matching is exact-ish: a name that merely contains one of
+// these as a substring of a longer word (for example "Tundra" or "SetupVPN")
+// is not treated as the TUN.
+func ownTunnelNames(brand config.Brand) []string {
+	return brand.Tunnels()
 }
 
 // virtualNameMarkers identify adapters that are not real Internet uplinks.
@@ -89,7 +89,7 @@ var virtualNameMarkers = []string{
 }
 
 // DefaultExcludedNames is the built-in blacklist of interfaces that must never
-// carry SniShaper outbound traffic. These are container bridges, virtual
+// carry outbound traffic. These are container bridges, virtual
 // machine host adapters, tunnel devices and other software-only interfaces
 // that have no presence on any physical medium; sending traffic through one
 // either blackholes it or feeds it back into the tunnel.
@@ -118,8 +118,8 @@ var DefaultExcludedNames = []string{
 // isDefaultExcluded reports whether name matches the built-in blacklist.
 // Entries ending in "*" are prefix globs; everything else is matched
 // case-insensitively as a whole name so unrelated adapters are not caught.
-func isDefaultExcluded(name string) bool {
-	if IsOwnTunnel(name) {
+func isDefaultExcluded(brand config.Brand, name string) bool {
+	if IsOwnTunnelOf(brand, name) {
 		return true
 	}
 	// 传 -1 关闭"纯数字 pattern 视为接口索引"的语义：黑名单是按名称匹配的，
@@ -138,6 +138,11 @@ func isDefaultExcluded(name string) bool {
 
 // Config tunes interface selection. The zero value is the production default.
 type Config struct {
+	// Brand identifies the embedding application. Its product name decides
+	// which interfaces count as "our own" TUN and are therefore never chosen
+	// as an outbound uplink. The zero value means the reference product.
+	Brand config.Brand
+
 	// ForceInterface pins selection to the named interface. Empty keeps
 	// automatic selection. An entry ending in "*" is a prefix glob.
 	ForceInterface string
@@ -232,16 +237,27 @@ type candidate struct {
 	usableSource bool
 }
 
-// IsOwnTunnel reports whether name belongs to a SniShaper TUN device.
+// IsOwnTunnel reports whether name belongs to the reference product's
+// (SniShaper's) TUN device. Embedders that brand their own adapters should
+// call IsOwnTunnelOf with their brand instead.
 func IsOwnTunnel(name string) bool {
+	return IsOwnTunnelOf(config.Brand{}, name)
+}
+
+// IsOwnTunnelOf reports whether name belongs to a TUN device created by the
+// application identified by brand.
+func IsOwnTunnelOf(brand config.Brand, name string) bool {
 	lowered := strings.ToLower(strings.TrimSpace(name))
-	for _, candidate := range tunNames {
+	if lowered == "" {
+		return false
+	}
+	for _, candidate := range ownTunnelNames(brand) {
 		if lowered == candidate {
 			return true
 		}
 	}
 	// Windows adapters created by sing-tun may carry a numeric suffix.
-	for _, candidate := range tunNames {
+	for _, candidate := range ownTunnelNames(brand) {
 		if rest, ok := strings.CutPrefix(lowered, candidate); ok && isAllDigits(rest) {
 			return true
 		}
@@ -273,7 +289,7 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// inTunPrefix reports whether addr belongs to SniShaper's own TUN addressing.
+// inTunPrefix reports whether addr belongs to our own TUN addressing.
 func inTunPrefix(addr netip.Addr) bool {
 	for _, prefix := range tunPrefixes {
 		if prefix.Contains(addr) {
@@ -367,7 +383,7 @@ func collect(family int, cfg Config, views []interfaceView, routes map[int]uint3
 	for _, view := range views {
 		item := candidate{view: view}
 
-		if !view.Up || view.Loopback || IsOwnTunnel(view.Name) {
+		if !view.Up || view.Loopback || IsOwnTunnelOf(cfg.Brand, view.Name) {
 			continue
 		}
 		if pattern, ok := matchesPattern(cfg.ExcludeInterfaces, view.Name, view.Index); ok {
@@ -377,7 +393,7 @@ func collect(family int, cfg Config, views []interfaceView, routes map[int]uint3
 		// 用户显式指定优先级最高，可以覆盖黑名单与降权。
 		if isForced(cfg.ForceInterface, view.Name, view.Index) {
 			item.preferred = true
-		} else if isDefaultExcluded(view.Name) {
+		} else if isDefaultExcluded(cfg.Brand, view.Name) {
 			// 内置黑名单：容器桥、虚拟机宿主网卡、隧道设备等纯软件接口。
 			// 这些网卡没有物理介质，走它们要么丢包要么把流量绕回隧道。
 			item.excluded = true
@@ -780,9 +796,9 @@ func (s *Selector) List(cfg Config) []Descriptor {
 			Name:         view.Name,
 			Index:        view.Index,
 			Up:           view.Up,
-			Physical:     !IsVirtualAdapter(view.Name) && !IsOwnTunnel(view.Name) && !view.Loopback,
+			Physical:     !IsVirtualAdapter(view.Name) && !IsOwnTunnelOf(cfg.Brand, view.Name) && !view.Loopback,
 			DefaultRoute: routeOwner[view.Index],
-			Usable:       view.Up && !view.Loopback && !IsOwnTunnel(view.Name),
+			Usable:       view.Up && !view.Loopback && !IsOwnTunnelOf(cfg.Brand, view.Name),
 			Selected:     isForced(cfg.ForceInterface, view.Name, view.Index),
 		}
 		item.CurrentOutbound = view.Index == autoIndex

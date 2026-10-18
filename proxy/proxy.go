@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/SnishaperTeam/snishaper-core/cfpool"
+	"github.com/SnishaperTeam/snishaper-core/config"
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
 	"github.com/SnishaperTeam/snishaper-core/log"
 	"github.com/SnishaperTeam/snishaper-core/netiface"
@@ -145,7 +146,15 @@ func (c FragmentConfig) IntervalMillis() int {
 // 用户为放行内网而填的 192.168.0.0/16 会把唯一一张家用路由网卡直接排除掉，
 // 表现为 TUN 启动后所有出站连接失败。
 func (c TUNConfig) InterfaceConfig() netiface.Config {
+	return c.InterfaceConfigFor(config.Brand{})
+}
+
+// InterfaceConfigFor is InterfaceConfig for a branded embedder: brand decides
+// which interfaces are recognised as our own TUN device and thus never used as
+// an outbound uplink.
+func (c TUNConfig) InterfaceConfigFor(brand config.Brand) netiface.Config {
 	return netiface.Config{
+		Brand:             brand.Resolve(),
 		ExcludeInterfaces: c.ExcludeInterfaces,
 		ForceInterface:    c.InterfaceName,
 	}
@@ -348,6 +357,8 @@ type ProxyServer struct {
 	ifaceConfig netiface.Config
 	// iface 是网卡选择器实例；原单仓实现用包级缓存，库化后随 ProxyServer 实例化。
 	iface *netiface.Selector
+	// brand 标识嵌入方产品名，出站网卡选择据此排除自家 TUN。
+	brand config.Brand
 
 	subscriptionDialer *subscriptionDialer
 }
@@ -411,7 +422,7 @@ func (a *dohProxyAdapter) GetPhysicalBinding(targetAddr string) (netiface.Bindin
 func (p *ProxyServer) SetTUNMode(enabled bool) {
 	cfg := netiface.Config{}
 	if enabled && p.rules != nil {
-		cfg = p.rules.GetTUNConfig().InterfaceConfig()
+		cfg = p.rules.GetTUNConfig().InterfaceConfigFor(p.brand)
 	}
 
 	p.iface.Invalidate()
@@ -1411,7 +1422,10 @@ func domainMatchScore(host, domain string, regexCache *sync.Map) int {
 	return -1
 }
 
-func normalizeTUNConfig(cfg TUNConfig) TUNConfig {
+// normalizeTUNConfig fills in defaults and clamps TUN settings. brand supplies
+// the product name used when AdapterName is blank, so each embedding
+// application gets an adapter named after itself.
+func normalizeTUNConfig(cfg TUNConfig, brand config.Brand) TUNConfig {
 	// MTU 必须夹在合理区间：sing-tun 的 gvisor 栈会按 MTU 预分配包缓冲，
 	// 过小（如 1）在 gvisor 内部直接产生不可用的分片，过大（如 65535）会让
 	// 每个包都按最大尺寸走缓冲池，长时间运行后内存显著膨胀。
@@ -1440,7 +1454,7 @@ func normalizeTUNConfig(cfg TUNConfig) TUNConfig {
 	}
 	cfg.AdapterName = strings.TrimSpace(cfg.AdapterName)
 	if cfg.AdapterName == "" {
-		cfg.AdapterName = "SniShaper"
+		cfg.AdapterName = brand.Display()
 	}
 	return cfg
 }
@@ -1527,10 +1541,18 @@ func defaultDNSNodes() []DNSNode {
 	return []DNSNode{}
 }
 
+// dohUserAgent builds the DoH User-Agent for the given brand. It mirrors the
+// browser-shaped prefix used by the resolver package, with the product name
+// appended so queries are attributable to this application.
+func dohUserAgent(brand config.Brand) string {
+	const prefix = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 "
+	return prefix + brand.Display() + "/1.0"
+}
+
 // FetchECH retrieves the ECH config for a domain via DoH, using the given URL if set.
 func (p *ProxyServer) FetchECH(ctx context.Context, domain string, dohURL string) ([]byte, error) {
 	if dohURL != "" {
-		return fetchECHDirect(ctx, domain, dohURL)
+		return fetchECHDirect(ctx, domain, dohURL, p.brand)
 	}
 	if p.dohResolver == nil {
 		return nil, fmt.Errorf("no DoH resolver available")
@@ -1540,7 +1562,7 @@ func (p *ProxyServer) FetchECH(ctx context.Context, domain string, dohURL string
 
 // fetchECHDirect sends a plain HTTPS DoH TypeHTTPS query to the given URL,
 // bypassing configured DNS nodes. Used by ECH profile probing.
-func fetchECHDirect(ctx context.Context, domain, dohURL string) ([]byte, error) {
+func fetchECHDirect(ctx context.Context, domain, dohURL string, brand config.Brand) ([]byte, error) {
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(domain), dns.TypeHTTPS)
 	buf, err := msg.Pack()
@@ -1555,7 +1577,7 @@ func fetchECHDirect(ctx context.Context, domain, dohURL string) ([]byte, error) 
 	req.ContentLength = int64(len(buf))
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("Accept", "application/dns-message")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 SNIShaper/1.0")
+	req.Header.Set("User-Agent", dohUserAgent(brand))
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)

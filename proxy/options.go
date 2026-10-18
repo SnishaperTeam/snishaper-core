@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"github.com/SnishaperTeam/snishaper-core/config"
 	"github.com/SnishaperTeam/snishaper-core/log"
 )
 
@@ -13,6 +14,7 @@ type options struct {
 	logger        log.Logger
 	onStop        func(error)
 	routerDebug   bool
+	brand         config.Brand
 }
 
 // Option is a functional option accepted by NewProxyServer and NewRuleManager.
@@ -54,6 +56,19 @@ func WithRouterDebug(enabled bool) Option {
 	return func(o *options) { o.routerDebug = enabled }
 }
 
+// WithBrand declares which application embeds this library. The brand decides
+// the user-visible product name: the default TUN adapter name, which interfaces
+// count as our own tunnel during outbound selection, and the CA subject used by
+// the certificate manager. The zero value keeps the reference product's name.
+func WithBrand(b config.Brand) Option {
+	return func(o *options) { o.brand = b }
+}
+
+// WithProductName is WithBrand for the common case of only naming the product.
+func WithProductName(name string) Option {
+	return WithBrand(config.Brand{Name: name})
+}
+
 // applyProxyOptions applies the constructor options to a freshly created
 // ProxyServer. Nil options are ignored.
 func applyProxyOptions(p *ProxyServer, opts []Option) {
@@ -78,6 +93,9 @@ func applyProxyOptions(p *ProxyServer, opts []Option) {
 	if o.onStop != nil {
 		p.OnStop = o.onStop
 	}
+	if o.brand.Name != "" {
+		p.brand = o.brand.Resolve()
+	}
 }
 
 // applyRuleManagerOptions applies the constructor options to a freshly
@@ -93,4 +111,7 @@ func applyRuleManagerOptions(rm *RuleManager, opts []Option) {
 		rm.logger = o.logger
 	}
 	rm.routerDebug = o.routerDebug
+	if o.brand.Name != "" {
+		rm.brand = o.brand.Resolve()
+	}
 }

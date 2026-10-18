@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"runtime"
-	"strings"  
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +14,7 @@ import (
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/control"
 
+	"github.com/SnishaperTeam/snishaper-core/config"
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
 	"github.com/SnishaperTeam/snishaper-core/netiface"
 	"github.com/SnishaperTeam/snishaper-core/proxy"
@@ -21,16 +22,21 @@ import (
 
 // Manager 管理 TUN 设备的生命周期与流量处理。
 type Manager struct {
-	mu             sync.Mutex
-	tun            tun.Tun
-	stack          tun.Stack
-	handler        *Handler
-	options        tun.Options
-	running        bool
-	releasing      atomic.Bool
-	resolver       *dohresolver.FailoverResolver
-	logf           func(string)
-	logger         *slog.Logger
+	mu        sync.Mutex
+	tun       tun.Tun
+	stack     tun.Stack
+	handler   *Handler
+	options   tun.Options
+	running   bool
+	releasing atomic.Bool
+	resolver  *dohresolver.FailoverResolver
+	logf      func(string)
+	logger    *slog.Logger
+	// brand 标识嵌入方产品名：决定 TUN 网卡默认名与残留网卡清理的匹配范围。
+	brand config.Brand
+	// udpRelay 是可选的 UDP 隧道，由代理层在创建 Manager 时注入；
+	// 非 nil 时 TUN 的 UDP（含 fake-ip / QUIC）经订阅节点转发。
+	udpRelay       UDPRelay
 	ifaceConfig    netiface.Config
 	iface          *netiface.Selector
 	networkMonitor tun.NetworkUpdateMonitor
@@ -48,9 +54,35 @@ type Manager struct {
 	closeHardCap time.Duration
 }
 
+// SetUDPRelay 注入 UDP 隧道（订阅节点）。必须在 Start 之前调用；
+// 传 nil 表示 UDP 只走直连。
+//
+// 由代理层实现：本包不能依赖订阅栈，否则会形成 import 环。
+func (m *Manager) SetUDPRelay(relay UDPRelay) {
+	m.mu.Lock()
+	m.udpRelay = relay
+	handler := m.handler
+	m.mu.Unlock()
+	// 已启动时立即生效，重连订阅节点无需重启 TUN。
+	if handler != nil {
+		handler.SetUDPRelay(relay)
+	}
+}
+
 // NewManager 创建一个 TUN 管理器。
 func NewManager(resolver *dohresolver.FailoverResolver, logf func(string)) *Manager {
+	return newManager(config.Brand{}, resolver, logf)
+}
+
+// NewManagerFor 创建一个属于 brand 所标识应用的 TUN 管理器：TUN 网卡默认名
+// 与残留网卡清理都按该品牌匹配，避免两个嵌入方互相删除对方的网卡。
+func NewManagerFor(brand config.Brand, resolver *dohresolver.FailoverResolver, logf func(string)) *Manager {
+	return newManager(brand, resolver, logf)
+}
+
+func newManager(brand config.Brand, resolver *dohresolver.FailoverResolver, logf func(string)) *Manager {
 	return &Manager{
+		brand:        brand.Resolve(),
 		resolver:     resolver,
 		logf:         logf,
 		logger:       newBridgedLogger(logf),
@@ -93,17 +125,17 @@ func (m *Manager) Start(cfg proxy.TUNConfig, proxyAddr string) (err error) {
 	m.logMemSnapshot("start: post-cleanup")
 
 	m.iface.Invalidate()
-	m.ifaceConfig = cfg.InterfaceConfig()
+	m.ifaceConfig = cfg.InterfaceConfigFor(m.brand)
 
 	mtu := cfg.MTU
 	if mtu <= 0 {
 		mtu = 9000
 	}
-	
+
 	adapterName := strings.TrimSpace(cfg.AdapterName)
 	if adapterName == "" {
-		adapterName = "SniShaper"
-	} 
+		adapterName = m.brand.Display()
+	}
 
 	m.options = tun.Options{
 		Name: adapterName,
@@ -196,7 +228,7 @@ func (m *Manager) Start(cfg proxy.TUNConfig, proxyAddr string) (err error) {
 				return tun.New(options)
 			}
 		}
-		if m.tun, err = newTunWithRetry(m.options, m.logf, newTun); err != nil {
+		if m.tun, err = newTunWithRetry(m.options, m.brand, m.logf, newTun); err != nil {
 			return err
 		}
 	}
@@ -205,7 +237,10 @@ func (m *Manager) Start(cfg proxy.TUNConfig, proxyAddr string) (err error) {
 
 	m.handler = NewHandler(proxyAddr, m.resolver, m.logf)
 	m.handler.iface = m.iface // 共享选择器：TUN 启停后的缓存失效对数据面立即生效
-	m.handler.SetInterfaceConfig(cfg.InterfaceConfig())
+	m.handler.SetInterfaceConfig(cfg.InterfaceConfigFor(m.brand))
+	if m.udpRelay != nil {
+		m.handler.SetUDPRelay(m.udpRelay)
+	}
 
 	stackStart := time.Now()
 	stackName := strings.TrimSpace(cfg.Stack)
@@ -253,7 +288,7 @@ func (m *Manager) Start(cfg proxy.TUNConfig, proxyAddr string) (err error) {
 // releaseLocked → 清理本项目遗留的虚拟网卡 → 输出阶段耗时与移除数量日志。
 //
 // 强杀进程后的遗留网卡没有进程内状态可回收，只能在此用系统 API 移除；
-// matchesSniShaperAdapter 的严格匹配保证绝不误删 sing-box / mihomo 的设备。
+// matchesBrandAdapter 的严格匹配保证绝不误删 sing-box / mihomo 的设备。
 // 返回 alreadyRunning=true 表示等待释放期间另一路 Start 已完成启动，
 // 调用方应直接视为启动成功（幂等语义）。
 func (m *Manager) cleanupResidualsLocked() (alreadyRunning bool, err error) {
@@ -281,7 +316,8 @@ func (m *Manager) adapterCleaner() func(logf func(string)) int {
 	if m.cleanAdaptersFn != nil {
 		return m.cleanAdaptersFn
 	}
-	return cleanupStaleAdapters
+	brand := m.brand
+	return func(logf func(string)) int { return cleanupStaleAdapters(brand, logf) }
 }
 
 // hasResidualsLocked 报告进程内是否仍有上次实例的资源（与 Stop 的
@@ -292,7 +328,7 @@ func (m *Manager) hasResidualsLocked() bool {
 		m.ifaceMonitor != nil || m.networkMonitor != nil
 }
 
-func newTunWithRetry(options tun.Options, logf func(string), newTun func(tun.Options) (tun.Tun, error)) (tun.Tun, error) {
+func newTunWithRetry(options tun.Options, brand config.Brand, logf func(string), newTun func(tun.Options) (tun.Tun, error)) (tun.Tun, error) {
 	maxRetry := 3
 	// 遗留网卡的首次清理已提升为 Start 的显式阶段（cleanupResidualsLocked，US1）；
 	// 这里仅保留创建失败重试之间的防御性清理，移除数量只进日志。
@@ -308,7 +344,7 @@ func newTunWithRetry(options tun.Options, logf func(string), newTun func(tun.Opt
 			return nil, fmt.Errorf("create tun failed: %w", err)
 		}
 		logf("[sing-tun] tun.New slow failure, retrying " + fmt.Sprint(i+1) + "/" + fmt.Sprint(maxRetry) + ": " + err.Error())
-		cleanupStaleAdapters(logf)
+		cleanupStaleAdapters(brand, logf)
 	}
 	return nil, fmt.Errorf("create tun failed after %d attempts: %w", maxRetry, lastErr)
 }

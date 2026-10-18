@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/SnishaperTeam/snishaper-core/config"
 )
 
 // Windows trust store: certificates live in the CurrentUser/LocalMachine
@@ -17,11 +19,11 @@ import (
 // PowerShell because certutil output would have to be parsed by hand for the
 // subject/expiry fields.
 
-func platformInstallHelp() string {
+func platformInstallHelp(_ config.Brand) string {
 	return "双击 CA 证书文件 -> 安装证书 -> 导入到\"受信任的根证书颁发机构\"（当前用户或本地计算机）"
 }
 
-func platformCACertInstalled(thumbprint string) bool {
+func platformCACertInstalled(brand config.Brand, thumbprint string) bool {
 	clean := func(s string) string {
 		s = strings.ToLower(s)
 		s = strings.ReplaceAll(s, " ", "")
@@ -41,8 +43,13 @@ func platformCACertInstalled(thumbprint string) bool {
 	return strings.Contains(clean(string(outputCA)), cleanThumb)
 }
 
-func platformListCerts() ([]InstalledCert, error) {
+func platformListCerts(brand config.Brand) ([]InstalledCert, error) {
+	// The subject/issuer filter is built from the product name so one
+	// application never lists another's root. PowerShell single-quoted strings
+	// escape an embedded quote by doubling it.
+	pattern := escapePowerShellPattern(brand.Display())
 	psScript := `
+$pattern = '` + pattern + `'
 $stores = @(
   @{ Location = 'CurrentUser'; Name = 'Root' },
   @{ Location = 'CurrentUser'; Name = 'CA' },
@@ -55,7 +62,7 @@ foreach ($spec in $stores) {
   try {
     $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
     foreach ($cert in $store.Certificates) {
-      if ($cert.Subject -match 'SniShaper' -or $cert.Issuer -match 'SniShaper') {
+      if ($cert.Subject -match $pattern -or $cert.Issuer -match $pattern) {
         $result += [PSCustomObject]@{
           subject = $cert.Subject
           thumbprint = $cert.Thumbprint
@@ -97,7 +104,7 @@ $result | ConvertTo-Json -Compress
 	return []InstalledCert{single}, nil
 }
 
-func platformInstallCA(caPath string) error {
+func platformInstallCA(_ config.Brand, caPath string) error {
 	// Use certutil to install to the CurrentUser Root store. This pops up a
 	// standard Windows security warning, so it runs visible (not hidden) to
 	// keep that interactive dialog in front of the user.
@@ -109,7 +116,7 @@ func platformInstallCA(caPath string) error {
 	return nil
 }
 
-func platformUninstallCert(storeLocation, storeName, thumbprint string) error {
+func platformUninstallCert(_ config.Brand, storeLocation, storeName, thumbprint string) error {
 	if storeLocation == "" {
 		storeLocation = "CurrentUser"
 	}
@@ -131,7 +138,34 @@ func platformUninstallCert(storeLocation, storeName, thumbprint string) error {
 
 var sha1ThumbprintPattern = regexp.MustCompile(`(?i)[A-F0-9]{40}`)
 
-func parseCertutilStoreOutput(output []byte, storeLocation, storeName string) []InstalledCert {
+// escapePowerShellPattern makes an arbitrary product name safe to embed in a
+// PowerShell single-quoted -match pattern: regex metacharacters are escaped and
+// a single quote is doubled (the only way to escape it inside '...').
+func escapePowerShellPattern(name string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`.`, `\.`,
+		`*`, `\*`,
+		`+`, `\+`,
+		`?`, `\?`,
+		`[`, `\[`,
+		`]`, `\]`,
+		`(`, `\(`,
+		`)`, `\)`,
+		`{`, `\{`,
+		`}`, `\}`,
+		`^`, `\^`,
+		`$`, `\$`,
+		`|`, `\|`,
+		`'`, `''`,
+	)
+	return replacer.Replace(name)
+}
+
+// matchesBrandText is defined once in cert.go: both the Linux anchor scan and
+// the Windows dump parser share it.
+
+func parseCertutilStoreOutput(brand config.Brand, output []byte, storeLocation, storeName string) []InstalledCert {
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	var blocks [][]string
 	var current []string
@@ -156,7 +190,7 @@ func parseCertutilStoreOutput(output []byte, storeLocation, storeName string) []
 	var certs []InstalledCert
 	for _, block := range blocks {
 		joined := strings.Join(block, "\n")
-		if !strings.Contains(strings.ToLower(joined), "snishaper") {
+		if !matchesBrandText(brand, joined) {
 			continue
 		}
 
@@ -166,7 +200,7 @@ func parseCertutilStoreOutput(output []byte, storeLocation, storeName string) []
 
 		for _, line := range block {
 			lower := strings.ToLower(line)
-			if subject == "" && strings.Contains(lower, "snishaper") {
+			if subject == "" && matchesBrandText(brand, lower) {
 				if idx := strings.Index(line, ":"); idx >= 0 && idx+1 < len(line) {
 					subject = strings.TrimSpace(line[idx+1:])
 				}
@@ -187,7 +221,7 @@ func parseCertutilStoreOutput(output []byte, storeLocation, storeName string) []
 			continue
 		}
 		if subject == "" {
-			subject = "SniShaper CA"
+			subject = brand.Display() + " CA"
 		}
 
 		certs = append(certs, InstalledCert{

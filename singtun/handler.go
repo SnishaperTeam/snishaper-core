@@ -31,7 +31,7 @@ import (
 // bypass logic if per-flow direct routing is ever needed.
 
 // Handler 实现 sing-tun 的 Handler 接口
-// 负责将 TUN 流量转发到 SniShaper Proxy
+// 负责将 TUN 流量转发到嵌入方自己的 Proxy
 type Handler struct {
 	proxyAddr   string
 	resolver    *dohresolver.FailoverResolver
@@ -62,11 +62,43 @@ type Handler struct {
 	// 取值必须 > sing-tun 的 UDPTimeout（manager.go 设为 60s），否则会在 NAT
 	// 仍认为会话存活时抢先拆除。用 atomic 存放是为了让测试可以调小它。
 	udpIdleSessionTTL atomic.Int64
-	mu                sync.Mutex
-	live              map[net.Conn]struct{}
-	livePacket        map[N.PacketConn]struct{}
-	closed            bool
-	wg                sync.WaitGroup
+	// udpRelay 是可选的 UDP 隧道，由代理层注入：订阅节点绑定时，
+	// TUN 的 UDP（含 fake-ip 目标与 QUIC）经节点转发而非直连丢弃。
+	udpRelay UDPRelay
+	mu       sync.Mutex
+	live     map[net.Conn]struct{}
+	// livePacket 与 live 分开统计：packet conn 的关闭语义不同，
+	// Close 需要分别等待，混在一起会漏关其中一类。
+	livePacket map[N.PacketConn]struct{}
+	closed     bool
+	wg         sync.WaitGroup
+}
+
+// UDPRelay resolves a UDP tunnel for a destination. It is implemented by the
+// proxy layer so this package does not depend on the subscription stack.
+//
+// The returned conn is a sing N.PacketConn rather than a net.PacketConn:
+// it carries the destination as M.Socksaddr and moves sing buf.Buffer values,
+// which keeps addresses typed and avoids a copy per datagram.
+type UDPRelay interface {
+	// OpenUDP returns a packet conn carrying traffic to destination, or
+	// ok=false when no relay applies and the caller should dial directly.
+	OpenUDP(ctx context.Context, destination M.Socksaddr) (conn N.PacketConn, ok bool, err error)
+}
+
+// SetUDPRelay installs the resolver used to tunnel UDP through a proxy node.
+// Passing nil restores direct-only UDP.
+func (h *Handler) SetUDPRelay(relay UDPRelay) {
+	h.mu.Lock()
+	h.udpRelay = relay
+	h.mu.Unlock()
+}
+
+// getUDPRelay reads the currently installed UDP tunnel, if any.
+func (h *Handler) getUDPRelay() UDPRelay {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.udpRelay
 }
 
 // track 登记一个 TCP 连接。返回 false 表示 Handler 已关闭，调用方必须
@@ -474,6 +506,27 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 		h.serveDNSOverPacketConn(ctx, conn, source, destination, onClose)
 		return
 	}
+
+	// A subscription node, when one is bound, carries the UDP itself. This is
+	// the only path that can deliver fake-ip datagrams: their addresses are
+	// synthetic and mean nothing to the local resolver, so forwardUDPDirect
+	// drops them and waits for the client to fall back to TCP.
+	if relay := h.getUDPRelay(); relay != nil {
+		packetConn, ok, err := relay.OpenUDP(ctx, destination)
+		if ok {
+			if err != nil {
+				h.logger.Warn("udp relay failed", "destination", destination.String(), "error", err)
+				_ = conn.Close()
+				if onClose != nil {
+					onClose(err)
+				}
+				return
+			}
+			h.forwardUDPRelay(ctx, conn, packetConn, onClose)
+			return
+		}
+	}
+
 	h.forwardUDPDirect(ctx, conn, source, destination, onClose)
 }
 
@@ -1053,6 +1106,155 @@ func (h *Handler) forwardUDPDirect(ctx context.Context, conn N.PacketConn, sourc
 		// 双向转发 + 空闲自毁看门狗。实现细节见 relayUDP 的文档注释。
 		h.relayUDP(ctx, conn, remoteConn, destination, destUDPAddr)
 	}()
+}
+
+// forwardUDPRelay relays datagrams between the TUN client and a proxy tunnel.
+// Both ends are sing N.PacketConn, so buffers move by pointer and the
+// destination stays a typed M.Socksaddr on both sides.
+//
+// The two directions must run independently: a QUIC handshake makes the
+// server emit several datagrams in a row, so a request/response loop would
+// deadlock waiting for a client packet that never comes.
+func (h *Handler) forwardUDPRelay(ctx context.Context, conn N.PacketConn, remote N.PacketConn, onClose N.CloseHandlerFunc) {
+	if !h.trackPacketConn(conn) {
+		_ = remote.Close()
+		_ = conn.Close()
+		if onClose != nil {
+			onClose(nil)
+		}
+		return
+	}
+
+	go func() {
+		defer remote.Close()
+		defer h.untrackPacketConn(conn)
+		defer func() {
+			_ = conn.Close()
+			if onClose != nil {
+				onClose(nil)
+			}
+		}()
+
+		// Packets must carry header room: the SOCKS5 relay frames each datagram
+		// with WritePacket, which extends the header in place. A buffer from the
+		// plain pool has none and would panic. ReadWaitOptions sizes the headroom
+		// for both ends of the tunnel (proven against the subscription stack in
+		// FlowWeaver, which reads UDP through this same relay).
+		readOptions := N.NewReadWaitOptions(conn, remote)
+
+		// 与 forwardUDPDirect 共用同一个空闲自毁看门狗：隧道侧同样可能
+		// 静默（QUIC 空闲期），否则会话与它的远端 conn 会永久滞留。
+		h.relayUDPPacket(ctx, conn, remote, readOptions)
+	}()
+}
+
+// packetRelayPeer 把上游 N.PacketConn 适配成 relayUDPPacket 需要的最小接口。
+//
+// 中继逻辑只用到「读一个包 / 写一个包」，抽成接口后既能吃直连路径的
+// *net.UDPConn（经 udpRelayPeer），也能吃隧道路径的 N.PacketConn。
+type packetRelayPeer interface {
+	ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error)
+	WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error
+	SetReadDeadline(t time.Time) error
+}
+
+// relayUDPPacket 在 conn（客户端侧）与 peer（隧道侧）之间双向转发，
+// 并在会话彻底静默超过 udpIdleSessionTTL 后自行退出。
+//
+// readOptions 决定两侧 buffer 的头部预留：隧道侧的 WritePacket 需要空间
+// 就地写入 SOCKS5 头，预留不足会 panic。
+//
+// 退出条件与 relayUDP 一致：真实错误、ctx 取消、或双向静默超时。
+func (h *Handler) relayUDPPacket(ctx context.Context, conn N.PacketConn, peer packetRelayPeer, readOptions N.ReadWaitOptions) {
+	var lastActive atomic.Int64
+	lastActive.Store(time.Now().UnixNano())
+	touch := func() { lastActive.Store(time.Now().UnixNano()) }
+	expired := func() bool {
+		ttl := time.Duration(h.udpIdleSessionTTL.Load())
+		return time.Since(time.Unix(0, lastActive.Load())) >= ttl
+	}
+
+	stopped := make(chan struct{})
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(func() { close(stopped) }) }
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// 方向一：客户端 → 隧道
+	go func() {
+		defer wg.Done()
+		defer stop()
+		for {
+			select {
+			case <-stopped:
+				return
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			_ = conn.SetReadDeadline(time.Now().Add(udpIdleTimeout))
+			packetBuf := readOptions.NewBufferSize(buf.UDPBufferSize)
+			destination, err := conn.ReadPacket(packetBuf)
+			if err != nil {
+				packetBuf.Release()
+				if isTimeout(err) {
+					if expired() {
+						return
+					}
+					continue // 客户端暂时空闲
+				}
+				return
+			}
+			touch()
+
+			// WritePacket 接管 buffer 所有权，不能再 Release。
+			if err := peer.WritePacket(packetBuf, destination); err != nil {
+				h.logger.Warn("failed to relay UDP", "error", err)
+				return
+			}
+		}
+	}()
+
+	// 方向二：隧道 → 客户端（独立持续读取：QUIC 多包响应不会丢失）
+	go func() {
+		defer wg.Done()
+		defer stop()
+		for {
+			select {
+			case <-stopped:
+				return
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			_ = peer.SetReadDeadline(time.Now().Add(udpIdleTimeout))
+			responseBuf := readOptions.NewBufferSize(buf.UDPBufferSize)
+			source, err := peer.ReadPacket(responseBuf)
+			if err != nil {
+				responseBuf.Release()
+				if isTimeout(err) {
+					if expired() {
+						return
+					}
+					continue // 隧道暂时无数据（QUIC 静默期）
+				}
+				return
+			}
+			touch()
+
+			// WritePacket 的 dest 是响应包的源地址（远端服务器），不是目标（应用）。
+			// 所有权随 WritePacket 转移，由 sing-tun 的写端负责 Release。
+			if err := conn.WritePacket(responseBuf, source); err != nil {
+				h.logger.Warn("failed to write relayed UDP response", "error", err)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
 }
 
 // proxyConn 双向复制数据，正确处理 TCP 半关闭

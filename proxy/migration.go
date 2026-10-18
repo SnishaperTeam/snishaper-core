@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/SnishaperTeam/snishaper-core/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -92,7 +94,7 @@ func setUnexportedField[T any](obj any, fieldName string, value T) {
 	}
 }
 
-func buildMigrationSessionState(resp migrationSessionResponse) (*tls.ClientSessionState, error) {
+func buildMigrationSessionState(brand config.Brand, resp migrationSessionResponse) (*tls.ClientSessionState, error) {
 	ticketBytes, err := hex.DecodeString(resp.Ticket)
 	if err != nil {
 		return nil, fmt.Errorf("decode ticket: %w", err)
@@ -111,7 +113,7 @@ func buildMigrationSessionState(resp migrationSessionResponse) (*tls.ClientSessi
 	setUnexportedField(state, "extMasterSecret", true)
 
 	// Populate PeerCertificates with a dummy self-signed cert to avoid panics.
-	if dummy, err := generateMigrationDummyCert(); err == nil {
+	if dummy, err := generateMigrationDummyCert(brand); err == nil {
 		if parsed, err := x509.ParseCertificate(dummy.Certificate[0]); err == nil {
 			setUnexportedField(state, "peerCertificates", []*x509.Certificate{parsed})
 		}
@@ -120,7 +122,7 @@ func buildMigrationSessionState(resp migrationSessionResponse) (*tls.ClientSessi
 	return tls.NewResumptionState(ticketBytes, state)
 }
 
-func generateMigrationDummyCert() (tls.Certificate, error) {
+func generateMigrationDummyCert(brand config.Brand) (tls.Certificate, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, err
@@ -132,7 +134,7 @@ func generateMigrationDummyCert() (tls.Certificate, error) {
 	}
 	template := x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{Organization: []string{"SniShaper Migration"}},
+		Subject:      pkix.Name{Organization: []string{brand.Display() + " Migration"}},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -376,7 +378,7 @@ func (p *ProxyServer) fetchMigrationTicket(cache *migrationSessionCache, host, p
 		return "", err
 	}
 
-	cs, err := buildMigrationSessionState(sessionResp)
+	cs, err := buildMigrationSessionState(p.brand, sessionResp)
 	if err != nil {
 		return "", err
 	}

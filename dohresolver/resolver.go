@@ -89,6 +89,8 @@ type FailoverResolver struct {
 	proxy    ProxyServer
 	getNodes func() []DNSNode
 	logger   corelog.Logger
+	// brand 决定 DoH 请求携带的产品 User-Agent。
+	brand    config.Brand
 	dnsCache sync.Map // domain -> *dnsCacheEntry
 	echCache sync.Map // domain -> []byte (ECH config hot-patched by server retry)
 
@@ -104,6 +106,24 @@ type Option func(*FailoverResolver)
 // (log.Nop default: an unconfigured resolver stays silent).
 func WithLogger(l corelog.Logger) Option {
 	return func(r *FailoverResolver) { r.logger = l }
+}
+
+// WithBrand declares the embedding application, which supplies the product
+// token in the DoH User-Agent.
+func WithBrand(b config.Brand) Option {
+	return func(r *FailoverResolver) { r.brand = b.Resolve() }
+}
+
+// dohUserAgentPrefix is the browser-shaped part of the DoH User-Agent. Some
+// resolvers reject non-browser clients outright, so every embedder sends the
+// same browser prefix and appends its own product token.
+const dohUserAgentPrefix = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 "
+
+// userAgent returns the DoH User-Agent for this application: the shared
+// browser prefix plus the product name, so operators can attribute queries to
+// a product instead of seeing the reference product's name.
+func (r *FailoverResolver) userAgent() string {
+	return dohUserAgentPrefix + r.brand.Display() + "/1.0"
 }
 
 // keyLockShards 是节点客户端键的分片锁数量。ResolveIPAddrs 会并发发起 A/AAAA 两个查询，
@@ -470,7 +490,7 @@ func (r *FailoverResolver) exchangeNodeWithRetry(ctx context.Context, node *DNSN
 	req.ContentLength = int64(len(buf))
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("Accept", "application/dns-message")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 SNIShaper/1.0")
+	req.Header.Set("User-Agent", r.userAgent())
 
 	resp, err := client.Do(req)
 	if err != nil {

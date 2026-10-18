@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/SnishaperTeam/snishaper-core/config"
 )
 
 // Linux trust store: the CA goes into the distribution's anchor directory and is
@@ -20,7 +22,11 @@ import (
 // and command line tools read the resulting system bundle, so nothing else has
 // to be written; Firefox keeps its own database and needs a manual import.
 
-const caAnchorFileName = "snishaper-ca.crt"
+func platformInstallHelp(brand config.Brand) string {
+	return "需要管理员权限：把 CA 复制到 /usr/local/share/ca-certificates/" + caAnchorFileNameFor(brand) + " 后执行 update-ca-certificates" +
+		"（Fedora 系为 /etc/pki/ca-trust/source/anchors + update-ca-trust，Arch 为 trust extract-compat）；" +
+		"Firefox 使用独立证书库，需在设置中手动导入"
+}
 
 var caAnchorDirs = []string{
 	"/usr/local/share/ca-certificates",
@@ -39,14 +45,8 @@ var caPublishedDirs = []string{
 	"/etc/ssl/certs",
 }
 
-func platformInstallHelp() string {
-	return "需要管理员权限：把 CA 复制到 /usr/local/share/ca-certificates/snishaper-ca.crt 后执行 update-ca-certificates" +
-		"（Fedora 系为 /etc/pki/ca-trust/source/anchors + update-ca-trust，Arch 为 trust extract-compat）；" +
-		"Firefox 使用独立证书库，需在设置中手动导入"
-}
-
-func platformCACertInstalled(thumbprint string) bool {
-	certs, err := collectCACerts()
+func platformCACertInstalled(brand config.Brand, thumbprint string) bool {
+	certs, err := collectCACerts(brand)
 	if err != nil {
 		return false
 	}
@@ -58,15 +58,15 @@ func platformCACertInstalled(thumbprint string) bool {
 	return false
 }
 
-func platformListCerts() ([]InstalledCert, error) {
-	certs, err := collectCACerts()
+func platformListCerts(brand config.Brand) ([]InstalledCert, error) {
+	certs, err := collectCACerts(brand)
 	if err != nil {
 		return nil, err
 	}
 
 	result := []InstalledCert{}
 	for _, cert := range certs {
-		if !isSniShaperCert(cert.Cert) {
+		if !isOwnCert(brand, cert.Cert) {
 			continue
 		}
 		result = append(result, InstalledCert{
@@ -81,8 +81,8 @@ func platformListCerts() ([]InstalledCert, error) {
 	return result, nil
 }
 
-func platformInstallCA(caPath string) error {
-	if err := requireRoot(); err != nil {
+func platformInstallCA(brand config.Brand, caPath string) error {
+	if err := requireRoot(brand); err != nil {
 		return err
 	}
 
@@ -96,7 +96,7 @@ func platformInstallCA(caPath string) error {
 		return fmt.Errorf("read CA certificate: %w", err)
 	}
 
-	target := filepath.Join(dir, caAnchorFileName)
+	target := filepath.Join(dir, caAnchorFileNameFor(brand))
 	if err := os.WriteFile(target, data, 0644); err != nil {
 		return fmt.Errorf("write %s: %w", target, err)
 	}
@@ -108,14 +108,14 @@ func platformInstallCA(caPath string) error {
 	return nil
 }
 
-func platformUninstallCert(_, _, thumbprint string) error {
-	if err := requireRoot(); err != nil {
+func platformUninstallCert(brand config.Brand, _, _, thumbprint string) error {
+	if err := requireRoot(brand); err != nil {
 		return err
 	}
 
 	removed := 0
 	for _, dir := range caAnchorDirs {
-		matches, err := filepath.Glob(filepath.Join(dir, "snishaper*.crt"))
+		matches, err := filepath.Glob(filepath.Join(dir, caAnchorFileNameFor(brand)))
 		if err != nil {
 			continue
 		}
@@ -155,7 +155,7 @@ type systemCert struct {
 
 // collectCACerts reads every certificate this platform can trust: the anchor
 // files this app installs plus the published system bundles.
-func collectCACerts() ([]systemCert, error) {
+func collectCACerts(brand config.Brand) ([]systemCert, error) {
 	var result []systemCert
 	seen := map[string]bool{}
 
@@ -179,7 +179,7 @@ func collectCACerts() ([]systemCert, error) {
 			continue
 		}
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasPrefix(strings.ToLower(entry.Name()), "snishaper") {
+			if entry.IsDir() || !matchesBrandText(brand, entry.Name()) {
 				continue
 			}
 			for _, cert := range parsePEMFile(filepath.Join(dir, entry.Name())) {
@@ -226,15 +226,25 @@ func parsePEMFile(path string) []*x509.Certificate {
 	return certs
 }
 
-func isSniShaperCert(cert *x509.Certificate) bool {
+// isOwnCert reports whether cert was issued by this application's CA: its
+// subject or issuer carries the product name. Matching is restricted to the
+// brand (see config.Brand.OwnNames) so one application never lists — or
+// uninstalls — another's root.
+func isOwnCert(brand config.Brand, cert *x509.Certificate) bool {
 	if cert == nil {
 		return false
 	}
 	subject := strings.ToLower(cert.Subject.String())
-	if strings.Contains(subject, "snishaper") {
-		return true
+	issuer := strings.ToLower(cert.Issuer.String())
+	for _, token := range brand.OwnNames() {
+		if token == "" {
+			continue
+		}
+		if strings.Contains(subject, token) || strings.Contains(issuer, token) {
+			return true
+		}
 	}
-	return strings.Contains(strings.ToLower(cert.Issuer.String()), "snishaper")
+	return false
 }
 
 // anchorMatchesThumbprint accepts an anchor file whose certificate carries the
@@ -341,9 +351,9 @@ func runWithTimeout(timeout time.Duration, name string, args ...string) ([]byte,
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
-func requireRoot() error {
+func requireRoot(brand config.Brand) error {
 	if os.Geteuid() != 0 {
-		return errors.New("installing the CA into the system trust store requires root; run SniShaper with sudo")
+		return errors.New("installing the CA into the system trust store requires root; run " + brand.Display() + " with sudo")
 	}
 	return nil
 }
