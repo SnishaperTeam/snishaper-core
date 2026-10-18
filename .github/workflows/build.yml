@@ -71,7 +71,12 @@ jobs:
   mark-running:
     name: mark CI running
     needs: gate
-    if: needs.gate.outputs.proceed == 'true'
+    # Dependabot-triggered pull_request runs receive no repo secrets, so
+    # the syntax-bot identity is unavailable there; skip the label state
+    # machine for those PRs (gate still lets the test matrix through).
+    if: >-
+      needs.gate.outputs.proceed == 'true' &&
+      secrets.SYNTAX_BOT_APP_ID != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -163,7 +168,8 @@ jobs:
     needs: [gate, ci]
     if: >-
       always() && !cancelled() &&
-      needs.gate.outputs.proceed == 'true'
+      needs.gate.outputs.proceed == 'true' &&
+      secrets.SYNTAX_BOT_APP_ID != ''
     runs-on: ubuntu-latest
     permissions:
       # GITHUB_TOKEN grants for the diagnostic log download; comment and
