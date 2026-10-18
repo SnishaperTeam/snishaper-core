@@ -1,0 +1,69 @@
+name: build
+
+# Library CI: build + vet + test on the three supported platforms,
+# with and without the with_gvisor build tag (TUN code paths).
+#   push(main) / pull_request / workflow_dispatch -> test matrix
+# The `ci` job is the stable single-point summary for branch protection.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GOPROXY: https://proxy.golang.org,direct
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Build (with_gvisor)
+        run: go build -tags with_gvisor ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+  # Stable single-point summary used as the required status check in
+  # branch protection ("ci"). Fails when any matrix leg failed.
+  ci:
+    name: ci
+    needs: [test]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert build outcome
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          failed="$(jq '[.[] | select(.result != "success" and .result != "skipped")] | length' <<<"$RESULTS")"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::one or more required CI jobs did not succeed"
+            exit 1
+          fi
+          echo "all required CI jobs succeeded"

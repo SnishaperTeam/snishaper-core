@@ -2,7 +2,7 @@
 
 [中文](README.md) | [English](README_EN.md) | [Русский](README_RU.md)
 
-[![Go Version](https://img.shields.io/badge/Go最低版本-1.27%2B-00ADD8?style=flat&logo=go)](https://golang.org) [![License](https://img.shields.io/badge/许可证-AGPL--3.0-blue?style=flat&logo=open-source-initiative)](LICENSE) [![GitHub last commit](https://img.shields.io/github/last-commit/SnishaperTeam/snishaper-core?style=flat&logo=git&label=最后提交)](https://github.com/SnishaperTeam/snishaper-core/commits/main) [![GitHub contributors](https://img.shields.io/github/contributors/SnishaperTeam/snishaper-core?style=flat&label=总贡献者)](https://github.com/SnishaperTeam/snishaper-core/graphs/contributors)
+[![Go Version](https://img.shields.io/badge/Go最低版本-1.27%2B-00ADD8?style=flat&logo=go)](https://golang.org) [![License](https://img.shields.io/badge/许可证-AGPL--3.0-blue?style=flat&logo=open-source-initiative)](LICENSE) [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/SnishaperTeam/snishaper-core/build.yml?style=flat&logo=githubactions&label=持续集成)](https://github.com/SnishaperTeam/snishaper-core/actions) [![GitHub last commit](https://img.shields.io/github/last-commit/SnishaperTeam/snishaper-core?style=flat&logo=git&label=最后提交)](https://github.com/SnishaperTeam/snishaper-core/commits/main) [![GitHub contributors](https://img.shields.io/github/contributors/SnishaperTeam/snishaper-core?style=flat&label=总贡献者)](https://github.com/SnishaperTeam/snishaper-core/graphs/contributors)
 
 **snishaper-core** 是 [SniShaper](https://github.com/SnishaperTeam/SniShaper) 的核心代理库，通过 **混合端口代理**、**规则引擎与 MITM**、**ECH 注入**、**TLS 分片**、**DoH 解析** 与 **TUN 数据面** 等能力，为复杂网络环境提供可嵌入、可测试的 Go 数据面。
 
