@@ -17,23 +17,23 @@ type ConfigFile struct {
 
 // ConfigRule is a per-domain rule entry inside an exported configuration.
 type ConfigRule struct {
-	Name          string           `json:"name"`
-	Website       string           `json:"website,omitempty"`
-	Mode          string           `json:"mode,omitempty"`
-	Enabled       bool             `json:"enabled"`
-	Domains       []string         `json:"domains"`
-	Upstream      string           `json:"upstream,omitempty"`
-	Upstreams     []string         `json:"upstreams,omitempty"`
-	DNSMode       string           `json:"dns_mode,omitempty"`
-	SniFake       string           `json:"sni_fake,omitempty"`
-	ConnectPolicy string           `json:"connect_policy,omitempty"`
-	SniPolicy     string           `json:"sni_policy,omitempty"`
-	ECHEnabled    bool             `json:"ech_enabled,omitempty"`
-	ECHProfileID  string           `json:"ech_profile_id,omitempty"`
-	ECHDomain     string           `json:"ech_domain,omitempty"`
-	UseCFPool     bool             `json:"use_cf_pool,omitempty"`
-	CertVerify    CertVerifyConfig `json:"cert_verify,omitempty"`
-	NAT64Enabled  bool             `json:"nat64_enabled,omitempty"`
+	Name           string           `json:"name"`
+	Website        string           `json:"website,omitempty"`
+	Mode           string           `json:"mode,omitempty"`
+	Enabled        bool             `json:"enabled"`
+	Domains        []string         `json:"domains"`
+	Upstream       string           `json:"upstream,omitempty"`
+	Upstreams      []string         `json:"upstreams,omitempty"`
+	DNSMode        string           `json:"dns_mode,omitempty"`
+	SniFake        string           `json:"sni_fake,omitempty"`
+	ConnectPolicy  string           `json:"connect_policy,omitempty"`
+	SniPolicy      string           `json:"sni_policy,omitempty"`
+	ECHEnabled     bool             `json:"ech_enabled,omitempty"`
+	ECHProfileID   string           `json:"ech_profile_id,omitempty"`
+	ECHDomain      string           `json:"ech_domain,omitempty"`
+	UseCFPool      bool             `json:"use_cf_pool,omitempty"`
+	CertVerify     CertVerifyConfig `json:"cert_verify,omitempty"`
+	NAT64Enabled   bool             `json:"nat64_enabled,omitempty"`
 	NAT64ProfileID string           `json:"nat64_profile_id,omitempty"`
 }
 
@@ -178,24 +178,24 @@ func (rm *RuleManager) ImportConfigWithSummary(content string) (ImportSummary, e
 				continue
 			}
 			sg := SiteGroup{
-				ID:            generateID(),
-				Name:          strings.TrimSpace(rule.Name),
-				Website:       strings.TrimSpace(rule.Website),
-				Domains:       rule.Domains,
-				Mode:          ruleMode,
-				Upstream:      strings.TrimSpace(rule.Upstream),
-				Upstreams:     append([]string(nil), rule.Upstreams...),
-				DNSMode:       normalizeDNSMode(rule.DNSMode),
-				SniFake:       strings.TrimSpace(rule.SniFake),
-				ConnectPolicy: strings.ToLower(strings.TrimSpace(rule.ConnectPolicy)),
-				SniPolicy:     strings.ToLower(strings.TrimSpace(rule.SniPolicy)),
-				Enabled:       rule.Enabled,
-				ECHEnabled:    rule.ECHEnabled,
-				ECHProfileID:  rule.ECHProfileID,
-				ECHDomain:     rule.ECHDomain,
-				UseCFPool:     rule.UseCFPool,
-				CertVerify:    rule.CertVerify,
-				NAT64Enabled:  rule.NAT64Enabled,
+				ID:             generateID(),
+				Name:           strings.TrimSpace(rule.Name),
+				Website:        strings.TrimSpace(rule.Website),
+				Domains:        rule.Domains,
+				Mode:           ruleMode,
+				Upstream:       strings.TrimSpace(rule.Upstream),
+				Upstreams:      append([]string(nil), rule.Upstreams...),
+				DNSMode:        normalizeDNSMode(rule.DNSMode),
+				SniFake:        strings.TrimSpace(rule.SniFake),
+				ConnectPolicy:  strings.ToLower(strings.TrimSpace(rule.ConnectPolicy)),
+				SniPolicy:      strings.ToLower(strings.TrimSpace(rule.SniPolicy)),
+				Enabled:        rule.Enabled,
+				ECHEnabled:     rule.ECHEnabled,
+				ECHProfileID:   rule.ECHProfileID,
+				ECHDomain:      rule.ECHDomain,
+				UseCFPool:      rule.UseCFPool,
+				CertVerify:     rule.CertVerify,
+				NAT64Enabled:   rule.NAT64Enabled,
 				NAT64ProfileID: rule.NAT64ProfileID,
 			}
 			if sg.Name == "" {

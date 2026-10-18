@@ -11,6 +11,7 @@ import (
 
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
 	"github.com/SnishaperTeam/snishaper-core/log"
+	"github.com/SnishaperTeam/snishaper-core/subscription"
 )
 
 // RuleManager 负责站点规则与各项配置的加载、保存和热更新。
@@ -32,27 +33,30 @@ type RuleManager struct {
 	autoEnableSysProxyOnAutoStart bool
 	autoUpdateRules               bool
 
-	listenPort                    string
-	echProfiles                   []ECHProfile
-	nat64Profiles                 []NAT64Profile
-	autoRouter                    *AutoRouter
-	autoRoutingConfig             AutoRoutingConfig
-	mu                            sync.RWMutex
-	routeEventCallback            func(domain, mode string)
-	onConfigSaved                 func()
-	language                      string
-	theme                         string
-	appearanceMode                string
-	migrationEnabled              bool
-	migrationServer               string
-	updateChannel                 string
-	downloadSource                string
-	customDownloadSource          string
-	rulesHashMu                   sync.Mutex
-	rulesHash                     string
-	logger                        log.Logger
-	routerDebug                   bool
-	domainRegexCache              sync.Map
+	listenPort           string
+	echProfiles          []ECHProfile
+	nat64Profiles        []NAT64Profile
+	autoRouter           *AutoRouter
+	autoRoutingConfig    AutoRoutingConfig
+	mu                   sync.RWMutex
+	routeEventCallback   func(domain, mode string)
+	onConfigSaved        func()
+	language             string
+	theme                string
+	appearanceMode       string
+	migrationEnabled     bool
+	migrationServer      string
+	updateChannel        string
+	downloadSource       string
+	customDownloadSource string
+	rulesHashMu          sync.Mutex
+	rulesHash            string
+	logger               log.Logger
+	routerDebug          bool
+	domainRegexCache     sync.Map
+
+	subscriptions     *subscription.Store
+	builtinSiteGroups []SiteGroup
 }
 
 // SetRouteEventCallback 设置路由模式变化时的回调。
@@ -294,6 +298,9 @@ func (rm *RuleManager) LoadConfig() error {
 	}
 
 	rm.buildRules()
+	// buildRules 之后立刻快照内置规则：ActivateSubscription 回退默认订阅时
+	// 要从这里恢复出厂 siteGroups。
+	rm.snapshotBuiltinSiteGroups()
 	if migrated {
 		if err := rm.saveRulesConfig(); err != nil {
 			rm.logf("[Config] migrate website field failed: %v", err)
@@ -959,13 +966,13 @@ func (rm *RuleManager) saveSettingsConfig() error {
 		AutoEnableProxyOnAutoStart:    &autoEnableProxyOnAutoStart,
 		AutoEnableSysProxyOnAutoStart: &autoEnableSysProxyOnAutoStart,
 		AutoUpdateRules:               &autoUpdateRules,
-		CloudflareConfig:           cloudflareConfig,
-		AutoRouting:                rm.autoRoutingConfig,
-		TUN:                        tunConfig,
-		Fragment:                   fragConfig,
-		Language:                   rm.language,
-		Theme:                      rm.theme,
-		AppearanceMode:             rm.appearanceMode,
+		CloudflareConfig:              cloudflareConfig,
+		AutoRouting:                   rm.autoRoutingConfig,
+		TUN:                           tunConfig,
+		Fragment:                      fragConfig,
+		Language:                      rm.language,
+		Theme:                         rm.theme,
+		AppearanceMode:                rm.appearanceMode,
 
 		MigrationEnabled:     &migrationEnabled,
 		MigrationServer:      rm.migrationServer,
@@ -989,6 +996,15 @@ func (rm *RuleManager) saveSettingsConfig() error {
 }
 
 func (rm *RuleManager) saveRulesConfig() error {
+	// A non-default subscription replaces siteGroups with subscription-derived
+	// rules. Persisting them would overwrite the shipped rules file and lose
+	// the user's built-in configuration, so writes are blocked until the
+	// default subscription is active again.
+	if active := rm.activeSubscriptionID(); active != "" && active != subscription.DefaultSubscriptionID {
+		rm.logf("[Subscription] skipping rules persist while subscription %q is active", active)
+		return nil
+	}
+
 	config := RulesConfig{
 		SiteGroups:    rm.siteGroups,
 		Upstreams:     rm.upstreams,

@@ -28,6 +28,27 @@ import (
 )
 
 func (p *ProxyServer) handleMITM(clientConn net.Conn, host string, rule Rule, dialCandidates []string, initialDialAddr string) {
+	p.handleMITMWithConn(clientConn, host, rule, dialCandidates, initialDialAddr, nil)
+}
+
+// negotiatedProtoOf reports the ALPN protocol of an already handshaked TLS
+// connection, defaulting to http/1.1 when the peer did not negotiate one.
+func negotiatedProtoOf(conn net.Conn) string {
+	type stateProvider interface {
+		ConnectionState() tls.ConnectionState
+	}
+	if sp, ok := conn.(stateProvider); ok {
+		if proto := sp.ConnectionState().NegotiatedProtocol; proto != "" {
+			return proto
+		}
+	}
+	return "http/1.1"
+}
+
+// handleMITMWithConn is handleMITM with an optional pre-established upstream
+// connection. When the traffic already arrived through a subscription node the
+// TLS session is complete, so it must be reused rather than re-dialled.
+func (p *ProxyServer) handleMITMWithConn(clientConn net.Conn, host string, rule Rule, dialCandidates []string, initialDialAddr string, existing net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
 			p.tracef("[MITM] Panic: %v", r)
@@ -72,6 +93,13 @@ func (p *ProxyServer) handleMITM(clientConn net.Conn, host string, rule Rule, di
 	tlsConfig := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			dialOnce.Do(func() {
+				if existing != nil {
+					p.tracef("[MITM] Reusing subscription-tunnelled upstream for %s", host)
+					upstreamRW = existing
+					upstreamProtocol = negotiatedProtoOf(existing)
+					return
+				}
+
 				initialALPN := "h2_h1"
 				if len(hello.SupportedProtos) > 0 {
 					hasH2 := false

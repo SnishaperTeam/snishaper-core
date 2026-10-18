@@ -16,8 +16,6 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-
-
 // ErrIPv6Required 表明规则要求 IPv6，但当前网络无法提供可用的 IPv6 候选。
 // 这是一个配置与网络不匹配的错误（dns_mode = ipv6_only 或启用了 NAT64），
 // 而不是一次传输故障：它不会被静默降级为 IPv4，否则规则的地址族约束会被
@@ -265,6 +263,29 @@ func (p *ProxyServer) prepareConnect(targetHost, targetAddr string, rule Rule) *
 	}
 }
 
+// dialSubscriptionTunnel 在规则绑定了订阅节点时，把到目标的隧道建好并装入 cr。
+// 返回 ok=false 表示该目标没有绑定节点，调用方继续走候选地址路径。
+func (p *ProxyServer) dialSubscriptionTunnel(cr *connectResult) (bool, error) {
+	if conn, ok, err := p.dialThroughSubscription(cr.targetAddr); ok {
+		if err != nil {
+			return true, err
+		}
+		// The node tunnel is opaque to the layers above, so the TLS (and any
+		// ECH config) for the real target has to be negotiated on top of it
+		// here. Otherwise MITM would re-dial and bypass the node entirely.
+		secure, err := p.secureOverTunnel(conn, cr)
+		if err != nil {
+			return true, err
+		}
+		cr.conn = secure
+		cr.tunnelled = true
+		cr.dialAddr = cr.targetAddr
+		cr.dialCandidates = []string{cr.targetAddr}
+		return true, nil
+	}
+	return false, nil
+}
+
 // resolveDialCandidates 只解析上游候选地址，不建立到上游的连接。
 // handleMITM 需要候选地址即可：上游 ALPN 必须按客户端宣告的协议来定，连接只能在
 // TLS 握手回调里由 establishUpstreamConn 建立，因此它用不到也不该拿到 cr.conn。
@@ -430,6 +451,12 @@ func (p *ProxyServer) dialUpstream(cr *connectResult) error {
 			return nil
 		}
 		p.tracef("[Connect] CFPool DialParallel failed: %v, falling back to buildDialCandidates", err)
+	}
+
+	// A subscription node, when bound, carries the traffic itself. It is
+	// checked after the Cloudflare pool so an explicit CF pool still wins.
+	if ok, err := p.dialSubscriptionTunnel(cr); ok {
+		return err
 	}
 
 	if err := p.resolveDialCandidates(cr); err != nil {

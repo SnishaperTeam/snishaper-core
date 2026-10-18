@@ -28,6 +28,7 @@ SniShaper 直接依赖本库；规则文件格式与配置语义在两者间保�
 
 - **混合端口代理**：单端口同时提供 HTTP CONNECT 与 SOCKS5。
 - **规则引擎与 MITM**：站点分组、多模式（MITM / Transparent / TLS-RF / QUIC / Migration / Direct）、按需证书签发。
+- **订阅与节点协议**：Clash 订阅解析，节点协议出站（vmess / vless / trojan / shadowsocks / hysteria / tuic / wireguard 等），规则可绑定订阅节点组。
 - **ECH 注入**：DoH 发现、热更新与恢复。
 - **TLS 分片**：ClientHello 分片与 OOB 发送。
 - **智能分流**：GFWList 后缀匹配与自动路由。
@@ -67,6 +68,7 @@ go run ./examples/basic 8080
 | 包 | 说明 |
 |----|------|
 | `proxy` | ProxyServer（混合端口）、RuleManager（规则引擎）、AutoRouter、MITM、上游拨号 |
+| `subscription` | Clash 订阅下载解析、节点存储与协议出站（mihomo 适配器） |
 | `dohresolver` | DoH 多节点故障切换与 ECH 配置热修复 |
 | `cfpool` | Cloudflare 优选 IP 池 |
 | `netiface` | 物理网卡选择与出站绑定（`Selector`） |

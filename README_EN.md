@@ -28,6 +28,7 @@ SniShaper depends on this library directly; rule file formats and configuration 
 
 - **Hybrid-port proxy**: HTTP CONNECT and SOCKS5 on a single port.
 - **Rule engine with MITM**: site groups, multiple modes (MITM / Transparent / TLS-RF / QUIC / Migration / Direct), on-demand certificate minting.
+- **Subscriptions & node protocols**: Clash subscription parsing, outbound node protocols (vmess / vless / trojan / shadowsocks / hysteria / tuic / wireguard, etc.), rules can bind to subscription node groups.
 - **ECH injection**: DoH discovery, hot reload and recovery.
 - **TLS fragmentation**: ClientHello splitting with OOB delivery.
 - **Smart routing**: GFWList suffix matching and auto routing.
@@ -67,6 +68,7 @@ go run ./examples/basic 8080
 | Package | Description |
 |---------|-------------|
 | `proxy` | ProxyServer (hybrid port), RuleManager (rule engine), AutoRouter, MITM, upstream dialing |
+| `subscription` | Clash subscription download/parsing, node storage and protocol outbound (mihomo adapters) |
 | `dohresolver` | Multi-node DoH failover with ECH config hot repair |
 | `cfpool` | Cloudflare preferred-IP pool |
 | `netiface` | Physical interface selection and outbound binding (`Selector`) |

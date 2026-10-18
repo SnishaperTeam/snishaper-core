@@ -16,8 +16,8 @@ import (
 type AutoRoutingMode string
 
 const (
-	AutoRoutingOff            AutoRoutingMode = ""
-	AutoRoutingDefault        AutoRoutingMode = "default" // ECH / TLS-RF / direct
+	AutoRoutingOff     AutoRoutingMode = ""
+	AutoRoutingDefault AutoRoutingMode = "default" // ECH / TLS-RF / direct
 )
 
 // AutoRoutingConfig is persisted in settings.json.

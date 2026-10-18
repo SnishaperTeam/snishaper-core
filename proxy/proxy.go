@@ -21,6 +21,7 @@ import (
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
 	"github.com/SnishaperTeam/snishaper-core/log"
 	"github.com/SnishaperTeam/snishaper-core/netiface"
+	"github.com/SnishaperTeam/snishaper-core/subscription"
 	"github.com/SnishaperTeam/snishaper-core/tlsfrag"
 
 	"github.com/miekg/dns"
@@ -53,6 +54,9 @@ type connectResult struct {
 	dialCandidates []string
 	dialAddr       string
 	conn           net.Conn
+	// tunnelled marks conn as already established through a subscription
+	// node, so MITM must reuse it instead of re-dialling the target.
+	tunnelled bool
 }
 
 // DNSNode describes a DoH upstream node.
@@ -344,6 +348,8 @@ type ProxyServer struct {
 	ifaceConfig netiface.Config
 	// iface 是网卡选择器实例；原单仓实现用包级缓存，库化后随 ProxyServer 实例化。
 	iface *netiface.Selector
+
+	subscriptionDialer *subscriptionDialer
 }
 
 type dohProxyAdapter struct {
@@ -873,6 +879,8 @@ func (p *ProxyServer) Stop() error {
 		p.cfPool.Stop()
 	}
 
+	subscription.ReleaseWireguardDialers()
+
 	mainLn := p.mainListener
 	httpChanLn := p.httpChanLn
 	socks5ChanLn := p.socks5ChanLn
@@ -1325,8 +1333,9 @@ func getDomainRegex(cache *sync.Map, pattern string) *regexp.Regexp {
 
 // MatchDomainScore reports how well a rule domain pattern matches host.
 // Higher scores win; -1 means no match. Patterns support "~regex",
-// "*.wildcard", plain suffix domains and "exact.$" terminators. Regex
-// patterns are compiled per call, so prefer RuleManager for hot paths.
+// "*keyword*" substrings, "*.wildcard", plain suffix domains and
+// "exact.$" terminators. Regex patterns are compiled per call, so prefer
+// RuleManager for hot paths.
 // It exists so embedders can audit rule data with the exact semantics
 // the data plane uses.
 func MatchDomainScore(host, domain string) int {
@@ -1351,6 +1360,16 @@ func domainMatchScore(host, domain string, regexCache *sync.Map) int {
 		}
 		if re.MatchString(host) {
 			return 900 + len(pattern) // exact(1000+) > regex(900+) > suffix/exact-domain
+		}
+		return -1
+	}
+
+	// DOMAIN-KEYWORD rules arrive as "*keyword*" (see the subscription
+	// converter). Substring match, scored below regex but above plain suffix.
+	if strings.HasPrefix(domain, "*") && strings.HasSuffix(domain, "*") && len(domain) > 2 {
+		keyword := strings.ToLower(domain[1 : len(domain)-1])
+		if keyword != "" && strings.Contains(host, keyword) {
+			return 800 + len(keyword)
 		}
 		return -1
 	}

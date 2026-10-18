@@ -52,8 +52,6 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 	// 这样直连也用 DoH 解析器选 IP（而非系统 DNS，避免 TUN 模式下系统 DNS 进 TUN 死循环）
 	// 且 IPv4 优先，避免 IPv6 成为唯一候选
 
-
-
 	// QUIC 规则命中的 TCP 连接：浏览器对 QUIC 站点回退到 TCP 时，本地终结 TLS
 	// 后经 H3/QUIC 上游 replay（NewQUICRoundTripper），用 QUIC 绕过 TCP 层 SNI 阻断。
 	if cr.effectiveMode == "quic" {
@@ -103,14 +101,21 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 	}
 
 	// mitm 不用 cr.conn：上游 ALPN 要按客户端宣告的协议来定，连接只能在 TLS 握手
-	// 回调里由 establishUpstreamConn 建立，这里仅解析候选地址。
+	// 回调里由 establishUpstreamConn 建立，这里仅解析候选地址（订阅节点隧道除外）。
 	if cr.effectiveMode == "mitm" {
-		if err := p.resolveDialCandidates(cr); err != nil {
-			p.tracef("[Connect] 502 (local): CONNECT %s mode=mitm rule-mode=%s upstream=%s error=%v",
-				targetAuthority, rule.Mode, rule.Upstream, err)
+		if ok, err := p.dialSubscriptionTunnel(cr); ok && err != nil {
 			http.Error(w, "Failed to connect to upstream", http.StatusBadGateway)
-			p.tracef("[Connect] Failed to resolve upstream candidates for %s: %v", cr.targetHost, err)
+			p.tracef("[Connect] Subscription tunnel failed for %s: %v", cr.targetHost, err)
 			return
+		}
+		if !cr.tunnelled {
+			if err := p.resolveDialCandidates(cr); err != nil {
+				p.tracef("[Connect] 502 (local): CONNECT %s mode=mitm rule-mode=%s upstream=%s error=%v",
+					targetAuthority, rule.Mode, rule.Upstream, err)
+				http.Error(w, "Failed to connect to upstream", http.StatusBadGateway)
+				p.tracef("[Connect] Failed to resolve upstream candidates for %s: %v", cr.targetHost, err)
+				return
+			}
 		}
 	} else if err := p.dialUpstream(cr); err != nil {
 		p.tracef("[Connect] 502 (local): CONNECT %s mode=%s rule-mode=%s upstream=%s candidates=%v error=%v",
@@ -120,7 +125,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 		return
 	}
 
-	// cr.conn 仅 tls-rf / transparent 使用，mitm 下为 nil
+	// cr.conn 仅 tls-rf / transparent / 订阅隧道 MITM 使用，纯候选路径下为 nil
 	closeUpstream := func() {
 		if cr.conn != nil {
 			cr.conn.Close()
@@ -160,7 +165,11 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 
 	switch cr.effectiveMode {
 	case "mitm":
-		p.handleMITM(clientConn, cr.targetHost, cr.rule, cr.dialCandidates, cr.dialAddr)
+		if cr.tunnelled {
+			p.handleMITMWithConn(clientConn, cr.targetHost, cr.rule, cr.dialCandidates, cr.dialAddr, cr.conn)
+		} else {
+			p.handleMITM(clientConn, cr.targetHost, cr.rule, cr.dialCandidates, cr.dialAddr)
+		}
 	case "tls-rf":
 		p.handleTLSFragment(clientConn, cr.conn, cr.targetHost, cr.rule)
 	default:

@@ -142,8 +142,6 @@ func (p *ProxyServer) handleSocks5Connect(ctx context.Context, writer io.Writer,
 		return nil
 	}
 
-
-
 	// QUIC 规则命中的 TCP 连接：本地终结 TLS 后经 H3/QUIC 上游 replay
 	// （handleQUICMITM），用 QUIC 绕过 TCP 层 SNI 阻断。
 	if cr.effectiveMode == "quic" {
@@ -159,12 +157,20 @@ func (p *ProxyServer) handleSocks5Connect(ctx context.Context, writer io.Writer,
 		return nil
 	}
 
-	// 同 HTTP CONNECT 路径：mitm 只解析候选地址，连接由 handleMITM 自建
+	// 同 HTTP CONNECT 路径：mitm 只解析候选地址（订阅节点隧道除外），
+	// 连接由 handleMITM 自建
 	if cr.effectiveMode == "mitm" {
-		if err := p.resolveDialCandidates(cr); err != nil {
-			p.tracef("[SOCKS5] failed to resolve upstream candidates: %v", err)
+		if ok, err := p.dialSubscriptionTunnel(cr); ok && err != nil {
+			p.tracef("[SOCKS5] subscription tunnel failed: %v", err)
 			socks5.SendReply(writer, statute.RepHostUnreachable, req.LocalAddr)
 			return err
+		}
+		if !cr.tunnelled {
+			if err := p.resolveDialCandidates(cr); err != nil {
+				p.tracef("[SOCKS5] failed to resolve upstream candidates: %v", err)
+				socks5.SendReply(writer, statute.RepHostUnreachable, req.LocalAddr)
+				return err
+			}
 		}
 	} else {
 		if err := p.dialUpstream(cr); err != nil {
@@ -188,7 +194,11 @@ func (p *ProxyServer) handleSocks5Connect(ctx context.Context, writer io.Writer,
 			writer: writer,
 		}
 		_ = hijackConn.SetDeadline(time.Time{})
-		p.handleMITM(hijackConn, cr.targetHost, cr.rule, cr.dialCandidates, cr.dialAddr)
+		if cr.tunnelled {
+			p.handleMITMWithConn(hijackConn, cr.targetHost, cr.rule, cr.dialCandidates, cr.dialAddr, cr.conn)
+		} else {
+			p.handleMITM(hijackConn, cr.targetHost, cr.rule, cr.dialCandidates, cr.dialAddr)
+		}
 	case "tls-rf":
 		hijackConn := &socks5HijackConn{
 			Conn:   clientConn,

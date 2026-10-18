@@ -239,9 +239,9 @@ func (p *ProxyServer) handleMigration(clientConn net.Conn, host, port string, ru
 		// 2c. TLS handshake with session resumption
 		cache.setActiveHost(host)
 		tlsConfig := &tls.Config{
-			ServerName: rule.SniFake,
-			MinVersion: tls.VersionTLS12,
-			MaxVersion: tls.VersionTLS12,
+			ServerName:         rule.SniFake,
+			MinVersion:         tls.VersionTLS12,
+			MaxVersion:         tls.VersionTLS12,
 			ClientSessionCache: cache,
 			// blindtls 约定：会话恢复握手时服务端不发送证书，无证书可校验
 			InsecureSkipVerify: true,

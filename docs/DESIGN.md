@@ -19,6 +19,7 @@ core 进程 RPC、规则演化测试器。
 | 包 | 来源 | 说明 |
 |----|------|------|
 | `proxy/` | 原 `proxy/` | ProxyServer、RuleManager、AutoRouter、MITM、SOCKS5、端口混合分发 |
+| `subscription/` | FlowWeaver `pkg/subscription` | Clash 订阅解析、节点存储、协议出站（mihomo 适配器、WireGuard 池化拨号器） |
 | `dohresolver/` | 原 `pkg/dohresolver` | FailoverResolver（DoH 故障切换、ECH 热修复） |
 | `cfpool/` | 原 `pkg/cfpool` | Cloudflare IP 池 |
 | `netiface/` | 原 `pkg/netiface` | 物理网卡选择与绑定 |
