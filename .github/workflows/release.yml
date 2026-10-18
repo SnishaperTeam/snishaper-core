@@ -2,9 +2,10 @@ name: release
 
 # Publish a GitHub Release for a version tag.
 #
-# Release notes come from GitHub's own "What's Changed" generator. When it
-# has nothing to list (commits pushed straight to main instead of through
-# pull requests) the workflow appends an explicit commit list.
+# The notes are assembled here: "What's Changed" is written from the commits
+# in the range (GitHub itself only lists merged pull requests, and this repo
+# commits straight to main), while GitHub's own "New Contributors" section
+# and Full Changelog link are kept as-is.
 #
 # Two ways in:
 #   push(tag v*)      -> publish that tag
@@ -122,27 +123,50 @@ jobs:
           PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           set -euo pipefail
-          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
 
-          # GitHub's generated body for this tag ("What's Changed").
-          notes="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+          # Our own "What's Changed": GitHub only summarises merged pull
+          # requests, and this repo commits straight to main. Entries follow
+          # the GitHub style: subject by @author in `sha`.
+          prev="$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)"
+          range="$TAG"
+          if [[ -n "$prev" ]]; then range="${prev}..${TAG}"; fi
+          echo "building What's Changed for $range"
+
+          changes=""
+          while IFS=$'\x1f' read -r sha short subject author; do
+            login="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}" \
+              --jq '.author.login // empty' 2>/dev/null || true)"
+            by="$author"
+            if [[ -n "$login" ]]; then by="@${login}"; fi
+            if [[ -n "$changes" ]]; then changes+=$'\n'; fi
+            changes+="* ${subject} by ${by} in \`${short}\`"
+          done < <(git log --no-merges --format='%H%x1f%h%x1f%s%x1f%an' "$range")
+
+          # Keep only GitHub's contributor list and Full Changelog line; its
+          # generated "What's Changed" body is replaced by the list above.
+          generated="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
             -f tag_name="$TAG" --jq .body)"
+          contributors="$(printf '%s\n' "$generated" | awk '
+            /^## New Contributors/ { on = 1 }
+            /^\*\*Full Changelog\*\*/ { on = 0 }
+            on { buf[++n] = $0 }
+            END {
+              while (n > 0 && buf[n] ~ /^[[:space:]]*$/) n--
+              for (i = 1; i <= n; i++) print buf[i]
+            }')"
+          changelog="$(printf '%s\n' "$generated" | grep -m1 '^\*\*Full Changelog\*\*' || true)"
 
-          # The generator only summarises merged pull requests, so commits
-          # pushed straight to main never show up. When it listed nothing,
-          # fall back to an explicit commit list: subject by author in sha.
-          if ! grep -q "## What's Changed" <<<"$notes"; then
-            prev="$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)"
-            range="$TAG"
-            if [[ -n "$prev" ]]; then range="${prev}..${TAG}"; fi
-            echo "generated notes have no What's Changed section - listing $range"
-            commits=""
-            while IFS=$'\x1f' read -r sha short subject author; do
-              commits+="- ${subject} by ${author} in [${short}](${repo_url}/commit/${sha})"$'\n'
-            done < <(git log --no-merges --format='%H%x1f%h%x1f%s%x1f%an' "$range")
-            if [[ -n "$commits" ]]; then
-              notes+=$'\n\n'"## Commits"$'\n\n'"$commits"
-            fi
+          notes=""
+          if [[ -n "$changes" ]]; then
+            notes="## What's Changed"$'\n\n'"$changes"
+          fi
+          if [[ -n "$(printf '%s' "$contributors" | tr -d '[:space:]')" ]]; then
+            if [[ -n "$notes" ]]; then notes+=$'\n\n'; fi
+            notes+="$contributors"
+          fi
+          if [[ -n "$changelog" ]]; then
+            if [[ -n "$notes" ]]; then notes+=$'\n\n'; fi
+            notes+="$changelog"
           fi
 
           flags=()
