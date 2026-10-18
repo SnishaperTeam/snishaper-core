@@ -4,23 +4,23 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.27%2B-00ADD8?style=flat&logo=go)](https://golang.org) [![License](https://img.shields.io/badge/Лицензия-AGPL--3.0-blue?style=flat&logo=open-source-initiative)](LICENSE) [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/SnishaperTeam/snishaper-core/build.yml?style=flat&logo=githubactions&label=CI)](https://github.com/SnishaperTeam/snishaper-core/actions) [![GitHub last commit](https://img.shields.io/github/last-commit/SnishaperTeam/snishaper-core?style=flat&logo=git&label=последний%20коммит)](https://github.com/SnishaperTeam/snishaper-core/commits/main) [![GitHub contributors](https://img.shields.io/github/contributors/SnishaperTeam/snishaper-core?style=flat&label=контрибьюторы)](https://github.com/SnishaperTeam/snishaper-core/graphs/contributors)
 
-**snishaper-core** — основная прокси-библиотека [SniShaper](https://github.com/SnishaperTeam/SniShaper), предоставляющая встраиваемую и тестируемую плоскость данных на Go для сложных сетевых условий: **гибридный прокси-порт**, **движок правил с MITM**, **внедрение ECH**, **фрагментация TLS**, **резолвер DoH** и **плоскость данных TUN**.
+**snishaper-core** — основная прокси-библиотека, общая для [SniShaper](https://github.com/SnishaperTeam/SniShaper) и [FlowWeaver](https://github.com/SnishaperTeam/FlowWeaver), предоставляющая встраиваемую и тестируемую плоскость данных на Go для сложных сетевых условий: **гибридный прокси-порт**, **движок правил с MITM**, **внедрение ECH**, **фрагментация TLS**, **резолвер DoH** и **плоскость данных TUN**.
 
 Библиотека не имеет глобального изменяемого состояния: по умолчанию молчит, не читает переменные окружения и не вызывает `os.Exit` — всё поведение внедряется через functional options.
 
 ---
 
-## Связь с SniShaper
+## Проекты-потребители
 
-[SniShaper](https://github.com/SnishaperTeam/SniShaper) — десктопное приложение для Windows / Linux (GUI + CLI), построенное на этой библиотеке; оба проекта поддерживаются параллельно:
+Библиотека встраивается в два приложения, все три проекта поддерживаются параллельно:
 
-| | [SniShaper](https://github.com/SnishaperTeam/SniShaper) | snishaper-core (этот репозиторий) |
-|---|---|---|
-| Роль | Десктопное приложение (GUI + CLI) | Встраиваемая библиотека ядра на Go |
-| Ключевые возможности | Интерфейс, системный прокси, трей, режим эволюции | ProxyServer, RuleManager, DoH, сертификаты, TUN |
-| Аудитория | Конечные пользователи | Go-разработчики |
+| | [SniShaper](https://github.com/SnishaperTeam/SniShaper) | [FlowWeaver](https://github.com/SnishaperTeam/FlowWeaver) | snishaper-core (этот репозиторий) |
+|---|---|---|---|
+| Роль | Лёгкий прокси-сервер (GUI + CLI) | Полнофункциональный клиент / шлюз | Встраиваемая библиотека ядра на Go |
+| Ключевые возможности | Интерфейс, системный прокси, трей, режим эволюции | Подписки Clash, мультипротокольные узлы, WireGuard, TUN-шлюз | ProxyServer, RuleManager, DoH, сертификаты, TUN |
+| Аудитория | Конечные пользователи | Конечные пользователи | Go-разработчики |
 
-SniShaper напрямую зависит от этой библиотеки; форматы файлов правил и семантика конфигураций согласованы между проектами.
+Оба приложения напрямую зависят от этой библиотеки; имя продукта внедряется через `config.Brand` (SniShaper использует значение по умолчанию `SniShaper`, FlowWeaver передаёт `FlowWeaver`). Форматы файлов правил и семантика конфигураций согласованы между всеми тремя проектами.
 
 ---
 
@@ -86,6 +86,7 @@ go run ./examples/basic 8080
 - **[docs/DESIGN.md](docs/DESIGN.md)** — проектирование библиотеки, границы пакетов и соглашения деглобализации.
 - **[examples/basic](examples/basic)** — минимальный пример встраивания.
 - **[SniShaper Wiki](https://github.com/SnishaperTeam/SniShaper/wiki)** — основные режимы, кастомные правила и другая документация прикладного уровня.
+- **[FlowWeaver Wiki](https://github.com/SnishaperTeam/FlowWeaver/wiki)** — импорт подписок, протоколы узлов и документация клиентской части.
 
 ---
 
