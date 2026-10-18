@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/SnishaperTeam/snishaper-core/config"
 )
 
 // DefaultSubscriptionID is the built-in entry that keeps the shipped rules and
@@ -52,7 +54,58 @@ type Store struct {
 	activeID   string
 	logf       func(string)
 	fetchProxy string
+	// brand 决定拉取订阅时携带的产品 User-Agent。
+	brand config.Brand
 }
+
+// options carries the settings shared by NewStore and Fetch. It mirrors the
+// option plumbing used by the proxy package so embedders configure both the
+// same way.
+type options struct {
+	brand config.Brand
+}
+
+// Option is a functional option accepted by NewStore and Fetch.
+type Option func(*options)
+
+// WithBrand declares which application embeds this library, which supplies the
+// product token in the subscription User-Agent. The zero value keeps the
+// reference product's name.
+func WithBrand(b config.Brand) Option {
+	return func(o *options) { o.brand = b }
+}
+
+// WithProductName is WithBrand for the common case of only naming the product.
+func WithProductName(name string) Option {
+	return WithBrand(config.Brand{Name: name})
+}
+
+// applyOptions applies opts to a fresh options value. Nil options are ignored.
+func applyOptions(opts []Option) options {
+	var o options
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	o.brand = o.brand.Resolve()
+	return o
+}
+
+// subscriptionUserAgent builds the User-Agent sent when downloading a
+// subscription. The "clash-verge" prefix is what providers expect and what the
+// reference client sends; the product token behind it is brand-specific so the
+// download is attributable to the embedding application instead of to the
+// library's reference product.
+func subscriptionUserAgent(brand config.Brand) string {
+	return clashVergeUserAgentPrefix + brand.Display()
+}
+
+// clashVergeUserAgentPrefix is the client-identifying part of the subscription
+// User-Agent. Providers routinely serve different rule sets or node lists based
+// on this string, so every embedder keeps the same prefix and only varies the
+// product token that follows it.
+const clashVergeUserAgentPrefix = "clash-verge/v2.0 "
 
 type storeFile struct {
 	ActiveID string   `json:"active_id"`
@@ -61,8 +114,13 @@ type storeFile struct {
 
 // NewStore loads the subscription store from disk. A missing file yields a
 // store containing only the built-in default entry.
-func NewStore(path string, logf func(string)) *Store {
-	s := &Store{path: path, logf: logf, activeID: DefaultSubscriptionID}
+//
+// Options configure embedder-specific behaviour; WithBrand sets the product
+// token used in the subscription User-Agent. Callers passing no options keep
+// the reference product's name.
+func NewStore(path string, logf func(string), opts ...Option) *Store {
+	o := applyOptions(opts)
+	s := &Store{path: path, logf: logf, activeID: DefaultSubscriptionID, brand: o.brand}
 	s.entries = []*Entry{builtinDefaultEntry()}
 	if err := s.load(); err != nil && logf != nil {
 		logf(fmt.Sprintf("[Subscription] load failed: %v", err))
@@ -587,7 +645,7 @@ func (s *Store) fetch(rawURL string) ([]byte, UserInfo, error) {
 
 	var errs []error
 	for _, client := range clients {
-		payload, userInfo, err := fetchWith(client, rawURL)
+		payload, userInfo, err := fetchWith(client, rawURL, s.brand)
 		if err == nil {
 			return payload, userInfo, nil
 		}
@@ -713,7 +771,11 @@ func (s *Store) SetGroupsForTest(id string, groups []Group) {
 // Fetch downloads a subscription payload and reads the quota header if present.
 // When proxyURL is non-empty the request is attempted through that HTTP proxy
 // first, with a direct connection as fallback.
-func Fetch(rawURL string, proxyURL string) ([]byte, UserInfo, error) {
+//
+// Options configure embedder-specific behaviour; WithBrand sets the product
+// token used in the subscription User-Agent.
+func Fetch(rawURL string, proxyURL string, opts ...Option) ([]byte, UserInfo, error) {
+	o := applyOptions(opts)
 	clients := make([]*http.Client, 0, 2)
 	if proxyURL != "" {
 		if pu, err := neturl.Parse(proxyURL); err == nil {
@@ -735,7 +797,7 @@ func Fetch(rawURL string, proxyURL string) ([]byte, UserInfo, error) {
 
 	var errs []error
 	for _, client := range clients {
-		payload, userInfo, err := fetchWith(client, rawURL)
+		payload, userInfo, err := fetchWith(client, rawURL, o.brand)
 		if err == nil {
 			return payload, userInfo, nil
 		}
@@ -744,12 +806,12 @@ func Fetch(rawURL string, proxyURL string) ([]byte, UserInfo, error) {
 	return nil, UserInfo{}, errors.Join(errs...)
 }
 
-func fetchWith(client *http.Client, rawURL string) ([]byte, UserInfo, error) {
+func fetchWith(client *http.Client, rawURL string, brand config.Brand) ([]byte, UserInfo, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, UserInfo{}, err
 	}
-	req.Header.Set("User-Agent", "clash-verge/v2.0 FlowWeaver")
+	req.Header.Set("User-Agent", subscriptionUserAgent(brand))
 	req.Header.Set("Accept", "*/*")
 
 	resp, err := client.Do(req)

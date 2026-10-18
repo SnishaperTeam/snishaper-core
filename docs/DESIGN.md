@@ -63,6 +63,11 @@ core 进程 RPC、规则演化测试器。
   `NewRuleManager(settingsPath, rulesPath, ...Option)`、
   `NewFailoverResolver(proxy, getNodes, ...Option)`、
   `NewAutoRouter(config, dohResolver, ...Option)`。
+- 产品身份统一经 `config.Brand` 注入：`proxy.WithBrand`/`WithProductName`、
+  `dohresolver.WithBrand`、`subscription.WithBrand`/`WithProductName`
+  （`NewStore` 与 `Fetch` 均接受）。零值时回落到
+  `config.DefaultProductName`。库内不得再出现写死的产品名——包括
+  `subscription` 拉取订阅时的 User-Agent（`clash-verge/v2.0 <产品名>`）。
 - `proxy.MatchDomainScore(host, domain) int`：导出域名匹配打分
   （`~regex`/`*.wildcard`/后缀/`exact.$` 四种模式），供嵌入方对规则数据
   做守卫测试——规则数据文件随应用仓库，不随库分发。
