@@ -306,7 +306,9 @@ func (h *Handler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 		info, c := h.sniffTLSSNI(conn)
 		conn = c
 		if info.SNI != "" && info.SNI != targetHost {
-			h.logger.Info("SNI sniffed", "sni", info.SNI, "previous", targetHost)
+			// Debug 级（与下方 TCP flow、以及 ECH 分支的同名日志一致）：
+			// 每个目标为 IP 的连接都会走这里，Info 会在浏览器场景下刷屏。
+			h.logger.Debug("SNI sniffed", "sni", info.SNI, "previous", targetHost)
 			targetHost = info.SNI
 		}
 	}
