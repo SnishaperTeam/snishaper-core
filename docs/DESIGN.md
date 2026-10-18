@@ -11,8 +11,9 @@ CLI/GUI 装配逻辑（`app/`、`cli/`、`core/`、`evolution/`、`main.go`、
 DoH 解析、ECH/TLS 分片、GFWList 分流、TUN（sing-tun）、网卡选择、
 证书管理。
 
-不属于库的职责（留在原项目）：Wails GUI、托盘、系统代理注册表写入、
-core 进程 RPC、规则演化测试器。
+不属于库的职责（留在原项目）：Wails GUI、托盘、core 进程 RPC 与提权。
+系统代理写入（`sysproxy`）与规则演化测试（`evolution`）两个应用原先各复制
+一份，现已收敛进本库。
 
 ## 包布局
 
@@ -27,6 +28,8 @@ core 进程 RPC、规则演化测试器。
 | `gfwlist/` | 原 `pkg/rules` | GFWList 后缀匹配（包名 rules→gfwlist，避免与 proxy 规则混淆） |
 | `certmanager/` | 原 `pkg/certmanager` | CA 生成与系统证书信任 |
 | `singtun/` | 原 `pkg/singtun` | sing-tun 数据面（Handler/Manager） |
+| `sysproxy/` | 两应用 `pkg/sysproxy` | 系统代理开关（Windows 注册表 / macOS networksetup / Linux gsettings），实例化 `Manager` |
+| `evolution/` | SniShaper `evolution/` | 规则演化：多模式探测域名可达性、生成临时站点分组规则 |
 | `config/` | 原 `common` 中的共享类型 | `CertVerifyConfig`、`MapNAT64Addr`、`HalfClose`、`VerifyChainOnly` |
 | `log/` | 新增 | `Logger` 接口 + `Nop`/`Std`/`Func` |
 | `internal/openutil/` | 原 `common/open_*.go` | shell 打开/资源管理器定位（certmanager 内部用） |
@@ -53,7 +56,10 @@ core 进程 RPC、规则演化测试器。
    Handler 字段，`NewHandler` 中初始化。
 5. **IPv6 出口探测缓存**（包级 ipv6Egress* 变量）→ Handler 字段
    （`ipv6EgressAvailable`/`invalidateIPv6Egress` 改为方法）。
-6. 保留的包级 `var` 全部为只读数据（前缀表、正则、syscall 惰性绑定、
+6. **`sysproxy` 进程级快照与状态缓存**（包级 `originalProxySettings`、
+   `cachedStatus`/`lastCheck`）→ `Manager` 实例字段；包内读取 `SUDO_USER`
+   的环境变量改为 `sysproxy.WithRunAsUser` 注入（与第 3 条同一原则）。
+7. 保留的包级 `var` 全部为只读数据（前缀表、正则、syscall 惰性绑定、
    `tunnelBufPool` 缓冲池、`log.Nop/Std`），无 init()、无 os.Exit、
    无 flag、无硬编码环境变量读取。
 

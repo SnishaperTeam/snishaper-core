@@ -76,6 +76,8 @@ go run ./examples/basic 8080
 | `gfwlist` | Суффиксное сопоставление доменов GFWList |
 | `certmanager` | Генерация CA, выпуск MITM-сертификатов, установка доверия в системе |
 | `singtun` | Плоскость данных TUN на базе sing-tun |
+| `sysproxy` | Переключение системного прокси (реестр Windows / networksetup macOS / gsettings Linux) через экземпляр `Manager` |
+| `evolution` | Эволюция правил: проверка домена разными режимами прокси и генерация временного правила группы сайтов |
 | `config` | Общие типы конфигурации (`CertVerifyConfig` и др.) |
 | `log` | Интерфейс `Logger` и адаптеры `Nop` / `Std` / `Func` |
 

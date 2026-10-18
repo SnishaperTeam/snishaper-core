@@ -76,6 +76,8 @@ go run ./examples/basic 8080
 | `gfwlist` | GFWList domain suffix matching |
 | `certmanager` | CA generation, MITM certificate minting, system trust installation |
 | `singtun` | sing-tun based TUN dataplane |
+| `sysproxy` | System proxy switch (Windows registry / macOS networksetup / Linux gsettings) through an instance `Manager` |
+| `evolution` | Rule evolution: probe a domain across proxy modes and generate a temporary site-group rule |
 | `config` | Shared configuration types (`CertVerifyConfig` etc.) |
 | `log` | `Logger` interface with `Nop` / `Std` / `Func` adapters |
 

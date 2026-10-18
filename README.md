@@ -76,6 +76,8 @@ go run ./examples/basic 8080
 | `gfwlist` | GFWList 域名后缀匹配 |
 | `certmanager` | CA 生成、MITM 证书签发、系统信任安装 |
 | `singtun` | 基于 sing-tun 的 TUN 数据面 |
+| `sysproxy` | 系统代理开关（Windows 注册表 / macOS networksetup / Linux gsettings），实例化 `Manager` |
+| `evolution` | 规则演化：多模式探测域名可达性、生成临时站点分组规则 |
 | `config` | 跨包共享配置类型（`CertVerifyConfig` 等） |
 | `log` | `Logger` 接口与 `Nop` / `Std` / `Func` 适配器 |
 
