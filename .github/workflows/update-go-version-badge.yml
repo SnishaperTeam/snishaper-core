@@ -1,0 +1,93 @@
+name: update-go-version-badge
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "37 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-go-version-badge
+  cancel-in-progress: true
+
+jobs:
+  update:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_BOT_NAME: SnishaperTeam-ReleaseBot
+      RELEASE_BOT_EMAIL: youmao2023@outlook.com
+      SIGNING_READY: ${{ secrets.GPG_PRIVATE_KEY != '' && secrets.GPG_PASSPHRASE != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Import release bot signing key
+        if: env.SIGNING_READY == 'true'
+        uses: crazy-max/ghaction-import-gpg@v7
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+          git_user_signingkey: true
+          git_commit_gpgsign: true
+          git_committer_name: ${{ env.RELEASE_BOT_NAME }}
+          git_committer_email: ${{ env.RELEASE_BOT_EMAIL }}
+
+      - name: Update minimum Go version badge
+        shell: bash
+        run: |
+          set -euo pipefail
+          min_go="$(sed -nE 's/^go[[:space:]]+([0-9]+\.[0-9]+).*$/\1/p' go.mod | head -n1)"
+          if [[ -z "$min_go" ]]; then
+            echo "::error::Unable to determine minimum Go version from go.mod"
+            exit 1
+          fi
+          export MIN_GO="$min_go"
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          minimum = os.environ["MIN_GO"]
+          readmes = {
+              "README.md": {
+                  "badge": r"https://img.shields.io/badge/Go(?:最低版本|版本)-[0-9]+\.[0-9]+(?:%2B|\+)-00ADD8",
+                  "badge_new": f"https://img.shields.io/badge/Go最低版本-{minimum}%2B-00ADD8",
+              },
+              "README_EN.md": {
+                  "badge": r"https://img.shields.io/badge/Go-[0-9]+\.[0-9]+(?:%2B|\+)-00ADD8",
+                  "badge_new": f"https://img.shields.io/badge/Go-{minimum}%2B-00ADD8",
+              },
+              "README_RU.md": {
+                  "badge": r"https://img.shields.io/badge/Go-[0-9]+\.[0-9]+(?:%2B|\+)-00ADD8",
+                  "badge_new": f"https://img.shields.io/badge/Go-{minimum}%2B-00ADD8",
+              },
+          }
+
+          for filename, config in readmes.items():
+              path = Path(filename)
+              text = path.read_text(encoding="utf-8")
+              updated, count = re.subn(config["badge"], config["badge_new"], text, count=1)
+              if count != 1:
+                  raise SystemExit(f"Go version badge not found in {filename}")
+              path.write_text(updated, encoding="utf-8")
+          PY
+
+      - name: Commit README badge changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "$RELEASE_BOT_NAME"
+          git config user.email "$RELEASE_BOT_EMAIL"
+          echo "::notice::committing as $RELEASE_BOT_NAME <$RELEASE_BOT_EMAIL> (gpg=$SIGNING_READY)"
+          git add README.md README_EN.md README_RU.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "docs: sync minimum Go version badges [skip ci]"
+          git push

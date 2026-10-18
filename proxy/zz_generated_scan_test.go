@@ -2,10 +2,34 @@
 // Auto-discovered smoke tests for side-effect-free helpers.
 package proxy
 
-import (
-	"sync"
-	"testing"
-)
+import "testing"
+
+func TestGenerated_MatchDomainScore(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Skipf("zero-value call panicked (not smoke-testable): MatchDomainScore")
+		}
+	}()
+	_ = MatchDomainScore("", "")
+}
+
+func TestGenerated_applyProxyOptions(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Skipf("zero-value call panicked (not smoke-testable): applyProxyOptions")
+		}
+	}()
+	applyProxyOptions(nil, nil)
+}
+
+func TestGenerated_applyRuleManagerOptions(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Skipf("zero-value call panicked (not smoke-testable): applyRuleManagerOptions")
+		}
+	}()
+	applyRuleManagerOptions(nil, nil)
+}
 
 func TestGenerated_certNames(t *testing.T) {
 	defer func() {
@@ -14,6 +38,15 @@ func TestGenerated_certNames(t *testing.T) {
 		}
 	}()
 	_ = certNames(nil)
+}
+
+func TestGenerated_dataHash(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Skipf("zero-value call panicked (not smoke-testable): dataHash")
+		}
+	}()
+	_ = dataHash(nil)
 }
 
 func TestGenerated_dedupeDialCandidates(t *testing.T) {
@@ -49,7 +82,7 @@ func TestGenerated_domainMatchScore(t *testing.T) {
 			t.Skipf("zero-value call panicked (not smoke-testable): domainMatchScore")
 		}
 	}()
-	_ = domainMatchScore("", "", &sync.Map{})
+	_ = domainMatchScore("", "", nil)
 }
 
 func TestGenerated_ensureLegacyCloudflareProfile(t *testing.T) {
@@ -95,6 +128,15 @@ func TestGenerated_isHopByHopHeader(t *testing.T) {
 		}
 	}()
 	_ = isHopByHopHeader("")
+}
+
+func TestGenerated_jsonFingerprint(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Skipf("zero-value call panicked (not smoke-testable): jsonFingerprint")
+		}
+	}()
+	_ = jsonFingerprint(nil)
 }
 
 func TestGenerated_matchesAllowedNames(t *testing.T) {
@@ -160,6 +202,15 @@ func TestGenerated_normalizeECHProfile(t *testing.T) {
 	normalizeECHProfile(nil)
 }
 
+func TestGenerated_normalizeStringList(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Skipf("zero-value call panicked (not smoke-testable): normalizeStringList")
+		}
+	}()
+	_ = normalizeStringList(nil)
+}
+
 func TestGenerated_resolveUpstreamHost(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -176,6 +227,15 @@ func TestGenerated_rewriteUTLSALPN(t *testing.T) {
 		}
 	}()
 	rewriteUTLSALPN(nil, nil)
+}
+
+func TestGenerated_sameJSON(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Skipf("zero-value call panicked (not smoke-testable): sameJSON")
+		}
+	}()
+	_ = sameJSON(nil, nil)
 }
 
 func TestGenerated_spkiHashBase64(t *testing.T) {

@@ -1,0 +1,28 @@
+version: 2
+
+updates:
+  # Go modules: check once every 1 day, grouped into one PR.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 1
+    open-pull-requests-limit: 10
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+
+  # GitHub Actions: check once every 1 day, grouped into one PR.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 1
+    open-pull-requests-limit: 10
+    groups:
+      actions:
+        patterns:
+          - "*"
