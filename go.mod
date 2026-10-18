@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/miekg/dns v1.1.73
-	github.com/quic-go/quic-go v0.63.0
+	github.com/quic-go/quic-go v0.64.0
 	github.com/refraction-networking/utls v1.8.2
 	github.com/sagernet/sing v0.9.6
 	github.com/sagernet/sing-tun v0.9.6
