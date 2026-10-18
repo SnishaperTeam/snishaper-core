@@ -85,9 +85,28 @@ jobs:
           PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
           set -euo pipefail
-          # GitHub's generated "What's Changed" body for this tag.
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+          # GitHub's generated body for this tag ("What's Changed").
           notes="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
             -f tag_name="$TAG" --jq .body)"
+
+          # The generator only summarises merged pull requests, so commits
+          # pushed straight to main never show up. When it listed nothing,
+          # fall back to an explicit commit list: subject by author in sha.
+          if ! grep -q "## What's Changed" <<<"$notes"; then
+            prev="$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)"
+            range="$TAG"
+            if [[ -n "$prev" ]]; then range="${prev}..${TAG}"; fi
+            echo "generated notes have no What's Changed section - listing $range"
+            commits=""
+            while IFS=$'\x1f' read -r sha short subject author; do
+              commits+="- ${subject} by ${author} in [${short}](${repo_url}/commit/${sha})"$'\n'
+            done < <(git log --no-merges --format='%H%x1f%h%x1f%s%x1f%an' "$range")
+            if [[ -n "$commits" ]]; then
+              notes+=$'\n\n'"## Commits"$'\n\n'"$commits"
+            fi
+          fi
 
           flags=()
           if [[ "$PRERELEASE" == "true" ]]; then
