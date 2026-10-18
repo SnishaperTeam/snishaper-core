@@ -1,20 +1,26 @@
 name: release
 
-# Publish a GitHub Release for a version tag. Release notes come from
-# GitHub's own "What's Changed" generator (releases/generate-notes), so
-# the library keeps no hand-written changelog.
+# Publish a GitHub Release for a version tag.
 #
-#   push(tag v*)      -> verify the tag builds/tests, then publish
-#   workflow_dispatch -> re-publish an existing tag; an existing release
-#                        is refreshed in place instead of duplicated
+# Release notes come from GitHub's own "What's Changed" generator. When it
+# has nothing to list (commits pushed straight to main instead of through
+# pull requests) the workflow appends an explicit commit list.
+#
+# Two ways in:
+#   push(tag v*)      -> publish that tag
+#   workflow_dispatch -> publish the version typed by hand (0.3.1 or v0.3.1)
+#
+# A release that already exists is never rewritten: the run stops with a
+# notice, so re-pushing a tag or repeating a dispatch is a no-op. Delete the
+# release first if its notes really have to be regenerated.
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
-      tag:
-        description: Existing tag to publish (e.g. v0.3.1)
+      version:
+        description: Version to publish (e.g. 0.3.1; the v prefix is optional)
         required: true
         type: string
 
@@ -23,7 +29,7 @@ permissions:
 
 # Never race two publishes of the same tag.
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -37,19 +43,21 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref }}
 
-      - name: Resolve tag
-        id: tag
+      - name: Resolve version
+        id: version
         env:
-          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          raw="${INPUT_VERSION:-${GITHUB_REF_NAME}}"
+          raw="${raw#refs/tags/}"
+          tag="$raw"
+          [[ "$tag" == v* ]] || tag="v$tag"
           # Consumers fetch this version as a Go module, so only accept a
-          # semver tag; a stray branch tag must not become a release.
+          # semver tag; a stray name must not become a release.
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::'$tag' is not a vX.Y.Z tag"
+            echo "::error::'$raw' does not resolve to a vX.Y.Z version"
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -59,30 +67,59 @@ jobs:
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "resolved '$raw' -> $tag"
+
+      # Stop here when the release is already published: nothing is rebuilt
+      # and nothing is overwritten.
+      - name: Check for an existing release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::release $TAG already exists - skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout ${{ steps.version.outputs.tag }}
+        if: steps.existing.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          git checkout --force "refs/tags/${{ steps.version.outputs.tag }}"
 
       - uses: actions/setup-go@v7
+        if: steps.existing.outputs.skip != 'true'
         with:
           go-version-file: go.mod
 
       # Gate the release on the same checks as build.yml: a tag is not
       # covered by the branch CI, so verify it here before publishing.
       - name: Build
+        if: steps.existing.outputs.skip != 'true'
         run: go build ./...
 
       - name: Build (with_gvisor)
+        if: steps.existing.outputs.skip != 'true'
         run: go build -tags with_gvisor ./...
 
       - name: Vet
+        if: steps.existing.outputs.skip != 'true'
         run: go vet ./...
 
       - name: Test
+        if: steps.existing.outputs.skip != 'true'
         run: go test ./...
 
       - name: Publish release
+        if: steps.existing.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           set -euo pipefail
           repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
@@ -113,13 +150,8 @@ jobs:
             flags+=(--prerelease)
           fi
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG already exists - refreshing notes"
-            gh release edit "$TAG" --notes "$notes" ${flags[@]+"${flags[@]}"}
-          else
-            gh release create "$TAG" \
-              --verify-tag \
-              --title "$TAG" \
-              --notes "$notes" \
-              ${flags[@]+"${flags[@]}"}
-          fi
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "$TAG" \
+            --notes "$notes" \
+            ${flags[@]+"${flags[@]}"}
