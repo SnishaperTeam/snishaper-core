@@ -1,0 +1,106 @@
+name: release
+
+# Publish a GitHub Release for a version tag. Release notes come from
+# GitHub's own "What's Changed" generator (releases/generate-notes), so
+# the library keeps no hand-written changelog.
+#
+#   push(tag v*)      -> verify the tag builds/tests, then publish
+#   workflow_dispatch -> re-publish an existing tag; an existing release
+#                        is refreshed in place instead of duplicated
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish (e.g. v0.3.1)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# Never race two publishes of the same tag.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  GOPROXY: https://proxy.golang.org,direct
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          # Consumers fetch this version as a Go module, so only accept a
+          # semver tag; a stray branch tag must not become a release.
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$tag' is not a vX.Y.Z tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # v0.4.0-rc.1 and friends are pre-releases, never "latest".
+          if [[ "$tag" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Gate the release on the same checks as build.yml: a tag is not
+      # covered by the branch CI, so verify it here before publishing.
+      - name: Build
+        run: go build ./...
+
+      - name: Build (with_gvisor)
+        run: go build -tags with_gvisor ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # GitHub's generated "What's Changed" body for this tag.
+          notes="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" --jq .body)"
+
+          flags=()
+          if [[ "$PRERELEASE" == "true" ]]; then
+            flags+=(--prerelease)
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists - refreshing notes"
+            gh release edit "$TAG" --notes "$notes" ${flags[@]+"${flags[@]}"}
+          else
+            gh release create "$TAG" \
+              --verify-tag \
+              --title "$TAG" \
+              --notes "$notes" \
+              ${flags[@]+"${flags[@]}"}
+          fi
