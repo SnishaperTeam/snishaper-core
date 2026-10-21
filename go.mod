@@ -9,7 +9,7 @@ require (
 	github.com/metacubex/sing-wireguard v0.0.0-20260826105301-c3ae17d19f9e
 	github.com/metacubex/wireguard-go v0.0.0-20250820062549-a6cecdd7f57f
 	github.com/miekg/dns v1.1.73
-	github.com/quic-go/quic-go v0.64.0
+	github.com/quic-go/quic-go v0.64.1
 	github.com/refraction-networking/utls v1.8.2
 	github.com/sagernet/sing v0.9.6
 	github.com/sagernet/sing-tun v0.9.6
