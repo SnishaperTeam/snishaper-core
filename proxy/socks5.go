@@ -109,7 +109,7 @@ func (p *ProxyServer) handleSocks5Connect(ctx context.Context, writer io.Writer,
 		}
 		p.tracef("[SOCKS5] direct mode, connecting directly")
 		dialer := &net.Dialer{Timeout: 10 * time.Second}
-		// 与 dialWithRule / directConnect 同理：TUN 开启时必须把 socket
+		// 与 dialWithRule 同理：TUN 开启时必须把 socket
 		// 钉在物理网卡上，否则 DIRECT 出站会被隧道重新捕获形成回环。
 		p.mu.RLock()
 		tunMode := p.tunMode

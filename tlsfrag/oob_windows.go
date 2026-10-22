@@ -16,14 +16,9 @@ func SendWithOOB(conn net.Conn, data []byte, oob byte) error {
 		return fmt.Errorf("get raw conn: %w", err)
 	}
 
-	var toSend []byte
-	if data == nil {
-		toSend = []byte{oob}
-	} else {
-		toSend = make([]byte, len(data)+1)
-		copy(toSend, data)
-		toSend[len(data)] = oob
-	}
+	toSend := make([]byte, len(data)+1)
+	copy(toSend, data)
+	toSend[len(data)] = oob
 	wsabuf := windows.WSABuf{
 		Len: uint32(len(toSend)),
 		Buf: &toSend[0],

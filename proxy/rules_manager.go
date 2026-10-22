@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,12 +130,12 @@ func (r *RuleManager) SetRules(rules []Rule) {
 // matchRule selects the best rule for host. routerDebug (WithRouterDebug)
 // enables per-request routing logs; it defaults to off to avoid log spam.
 func (r *RuleManager) matchRule(host, mode string) Rule {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	host = normalizeHost(host)
 	mode = strings.ToLower(strings.TrimSpace(mode))
 
+	// 手动规则匹配在锁内完成；命中所需的一切都先取本地副本再放锁：
+	// AutoRouter.Decide 可能触发 5s 的 DoH 查询，持锁等它会让规则写入方全部停摆。
+	r.mu.RLock()
 	best := Rule{}
 	bestScore := -1
 	for _, rule := range r.rules {
@@ -148,16 +149,20 @@ func (r *RuleManager) matchRule(host, mode string) Rule {
 			bestScore = score
 		}
 	}
+	autoRouter := r.autoRouter
+	autoMode := r.autoRoutingConfig.Mode
+	routerDebug := r.routerDebug
+	r.mu.RUnlock()
 
 	// 如果命中了特定规则
 	if bestScore >= 0 {
 		if mode == "transparent" && best.Mode == "mitm" {
-			if r.routerDebug {
+			if routerDebug {
 				r.logf("[RuleMatch] Global Transparent detected: Downgrading MITM rule (%s) to DIRECT to avoid cert errors.", host)
 			}
 			best.Mode = "direct"
 		}
-		if r.routerDebug {
+		if routerDebug {
 			r.logf("[Router] %s -> %s", host, best.Mode)
 		}
 		r.emitRouteEvent(host, best.Mode)
@@ -165,10 +170,10 @@ func (r *RuleManager) matchRule(host, mode string) Rule {
 	}
 
 	// 自动分流层：手动规则未命中时，查询 AutoRouter
-	if r.autoRouter != nil && r.autoRoutingConfig.Mode != "" {
-		autoRule := r.autoRouter.Decide(host)
+	if autoRouter != nil && autoMode != "" {
+		autoRule := autoRouter.Decide(host)
 		if autoRule.Mode != "direct" {
-			if r.routerDebug {
+			if routerDebug {
 				r.logf("[Router] %s -> %s (AutoRoute)", host, autoRule.Mode)
 			}
 			r.emitRouteEvent(host, autoRule.Mode)
@@ -991,11 +996,21 @@ func (rm *RuleManager) saveSettingsConfig() error {
 	if err := os.MkdirAll(filepath.Dir(rm.settingsPath), 0755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(rm.settingsPath, data, 0644); err != nil {
+	if err := writeFileAtomic(rm.settingsPath, data, 0644); err != nil {
 		return err
 	}
 	rm.triggerConfigSaved()
 	return nil
+}
+
+// writeFileAtomic writes data via a temp file + rename so a concurrent reader
+// (or a crash mid-write) can never observe a truncated config file.
+func writeFileAtomic(path string, data []byte, perm fs.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func (rm *RuleManager) saveRulesConfig() error {
@@ -1025,7 +1040,7 @@ func (rm *RuleManager) saveRulesConfig() error {
 		return err
 	}
 
-	if err := os.WriteFile(rm.rulesPath, data, 0644); err != nil {
+	if err := writeFileAtomic(rm.rulesPath, data, 0644); err != nil {
 		return err
 	}
 	rm.setRulesHash(dataHash(data))
@@ -1158,6 +1173,10 @@ func (rm *RuleManager) GetAutoRouter() *AutoRouter {
 func (rm *RuleManager) InitAutoRouter(resolver *dohresolver.FailoverResolver) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
+	// 停掉旧实例的 30 分钟缓存清理协程，重复初始化才不会泄漏。
+	if rm.autoRouter != nil {
+		rm.autoRouter.Stop()
+	}
 	rm.autoRouter = NewAutoRouter(rm.autoRoutingConfig, resolver, WithLogger(rm.logger))
 
 	// Try loading cached GFW list

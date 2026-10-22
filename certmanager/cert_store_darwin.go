@@ -70,8 +70,6 @@ func platformInstallCA(_ config.Brand, caPath string) error {
 	if err != nil {
 		return fmt.Errorf("security add-trusted-cert failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
-
-	fmt.Println("[Cert] CA certificate installed successfully to " + keychain)
 	return nil
 }
 
@@ -102,7 +100,6 @@ func platformUninstallCert(_ config.Brand, storeLocation, _, thumbprint string) 
 		return errors.New("no keychain available for removal")
 	}
 
-	fmt.Println("[Cert] removed certificate " + thumbprint)
 	return nil
 }
 

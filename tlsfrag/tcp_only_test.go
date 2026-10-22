@@ -2,6 +2,8 @@ package tlsfrag
 
 import (
 	"bytes"
+	"encoding/binary"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -174,5 +176,55 @@ func TestSendRecords_SingleSegment_SendsAllAtOnce(t *testing.T) {
 	}
 	if !bytes.Equal(rec.writes[0], ch) {
 		t.Error("segments=1: payload differs from original")
+	}
+}
+
+// 默认多记录路径（records=4, segments=2）：接收端按 TLS 记录边界重组，
+// 各记录载荷拼接后必须与原始 ClientHello 载荷逐字节一致。
+func TestSendRecords_MultiRecord_ReassemblesOverPipe(t *testing.T) {
+	host := "github.com"
+	ch := buildClientHelloForTest(host)
+	_, sniPos, sniLen, _, err := ParseClientHello(ch)
+	if err != nil {
+		t.Fatalf("ParseClientHello: %v", err)
+	}
+
+	client, server := net.Pipe()
+	defer server.Close()
+
+	sent := make(chan error, 1)
+	go func() {
+		err := SendRecords(client, ch, sniPos, sniLen, 4, 2, false, false, false, 0)
+		client.Close()
+		sent <- err
+	}()
+
+	received, err := io.ReadAll(server)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if err := <-sent; err != nil {
+		t.Fatalf("SendRecords: %v", err)
+	}
+
+	var payload []byte
+	records := 0
+	for len(received) > 0 {
+		if len(received) < 5 {
+			t.Fatalf("trailing bytes: %d", len(received))
+		}
+		rl := int(binary.BigEndian.Uint16(received[3:5]))
+		if len(received) < 5+rl {
+			t.Fatalf("truncated record: need %d bytes, have %d", 5+rl, len(received))
+		}
+		payload = append(payload, received[5:5+rl]...)
+		received = received[5+rl:]
+		records++
+	}
+	if records != 4 {
+		t.Errorf("got %d records, want 4", records)
+	}
+	if !bytes.Equal(payload, ch[5:]) {
+		t.Errorf("reassembled payload differs from original:\n got %d bytes, want %d", len(payload), len(ch)-5)
 	}
 }

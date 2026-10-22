@@ -37,19 +37,30 @@ var cloudflareCIDRStrings = []string{
 // AutoRouter makes per-request routing decisions for domains not covered by
 // manual SiteGroup rules.
 type AutoRouter struct {
-	config      AutoRoutingConfig
-	gfwList     *gfwlist.GFWList
-	cfNets      []*net.IPNet
-	cfCache     map[string]cfCacheEntry
-	cfCacheMu   sync.RWMutex
-	dohResolver *dohresolver.FailoverResolver
-	stopChan    chan struct{}
-	logger      log.Logger
+	config   AutoRoutingConfig
+	configMu sync.RWMutex
+	gfwList  *gfwlist.GFWList
+	cfNets   []*net.IPNet
+	cfCache  map[string]cfCacheEntry
+	cfCacheMu sync.RWMutex
+	// cfInflight dedupes concurrent IsCloudflare lookups per host (singleflight):
+	// the first caller runs the DoH query, late callers wait and reuse its result.
+	cfInflight   map[string]*cfInflightCall
+	cfInflightMu sync.Mutex
+	dohResolver  *dohresolver.FailoverResolver
+	stopChan     chan struct{}
+	stopOnce     sync.Once
+	logger       log.Logger
 }
 
 type cfCacheEntry struct {
 	isCF      bool
 	checkedAt time.Time
+}
+
+type cfInflightCall struct {
+	done chan struct{}
+	isCF bool
 }
 
 const cfCacheTTL = 30 * time.Minute
@@ -68,6 +79,7 @@ func NewAutoRouter(config AutoRoutingConfig, dohResolver *dohresolver.FailoverRe
 		config:      config,
 		gfwList:     gfwlist.NewGFWList(),
 		cfCache:     make(map[string]cfCacheEntry),
+		cfInflight:  make(map[string]*cfInflightCall),
 		dohResolver: dohResolver,
 		stopChan:    make(chan struct{}),
 		logger:      log.Nop,
@@ -95,9 +107,9 @@ func NewAutoRouter(config AutoRoutingConfig, dohResolver *dohresolver.FailoverRe
 	return ar
 }
 
-// Stop halts the auto router and its background workers.
+// Stop halts the auto router and its background workers. Safe to call twice.
 func (ar *AutoRouter) Stop() {
-	close(ar.stopChan)
+	ar.stopOnce.Do(func() { close(ar.stopChan) })
 }
 
 func (ar *AutoRouter) cacheCleanupLoop() {
@@ -149,6 +161,25 @@ func (ar *AutoRouter) IsCloudflare(host string) bool {
 	}
 	ar.cfCacheMu.RUnlock()
 
+	// Singleflight: join an in-flight lookup for the same host instead of
+	// firing a duplicate DoH query.
+	ar.cfInflightMu.Lock()
+	if call, ok := ar.cfInflight[host]; ok {
+		ar.cfInflightMu.Unlock()
+		<-call.done
+		return call.isCF
+	}
+	call := &cfInflightCall{done: make(chan struct{})}
+	ar.cfInflight[host] = call
+	ar.cfInflightMu.Unlock()
+
+	defer func() {
+		ar.cfInflightMu.Lock()
+		delete(ar.cfInflight, host)
+		ar.cfInflightMu.Unlock()
+		close(call.done)
+	}()
+
 	isCF := false
 	if ar.dohResolver != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -171,13 +202,17 @@ func (ar *AutoRouter) IsCloudflare(host string) bool {
 	if isCF {
 		ar.logf("[AutoRoute] %s → Cloudflare", host)
 	}
+	call.isCF = isCF
 	return isCF
 }
 
 // Decide returns a synthetic Rule for a GFWList-matched domain.
 // Returns a "direct" rule if the domain is not in the GFW list.
 func (ar *AutoRouter) Decide(host string) Rule {
-	if ar.config.Mode == AutoRoutingOff || ar.config.Mode == "" {
+	ar.configMu.RLock()
+	mode := ar.config.Mode
+	ar.configMu.RUnlock()
+	if mode == AutoRoutingOff || mode == "" {
 		return Rule{Mode: "direct", Enabled: true}
 	}
 
@@ -215,11 +250,15 @@ func (ar *AutoRouter) GetGFWList() *gfwlist.GFWList {
 
 // UpdateConfig replaces the auto-routing configuration.
 func (ar *AutoRouter) UpdateConfig(config AutoRoutingConfig) {
+	ar.configMu.Lock()
 	ar.config = config
+	ar.configMu.Unlock()
 }
 
 // GetConfig returns the current auto-routing configuration.
 func (ar *AutoRouter) GetConfig() AutoRoutingConfig {
+	ar.configMu.RLock()
+	defer ar.configMu.RUnlock()
 	return ar.config
 }
 
@@ -232,6 +271,8 @@ type GFWListStatus struct {
 
 // GetStatus returns the auto-routing status exposed to the frontend.
 func (ar *AutoRouter) GetStatus() GFWListStatus {
+	ar.configMu.RLock()
+	defer ar.configMu.RUnlock()
 	return GFWListStatus{
 		Enabled:     ar.config.Mode != "" && ar.config.Mode != AutoRoutingOff,
 		Mode:        string(ar.config.Mode),

@@ -417,9 +417,6 @@ func (m *Manager) releaseLocked() {
 		m.networkMonitor = nil
 		m.logger.Info("release: network monitor closed", "elapsed", time.Since(start).String())
 	}
-	if m.handler != nil {
-		m.handler.invalidateIPv6Egress()
-	}
 	m.running = false
 	m.logMemSnapshot("release: end")
 }

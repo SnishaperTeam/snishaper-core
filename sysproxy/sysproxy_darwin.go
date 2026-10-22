@@ -22,6 +22,10 @@ type SystemProxyStatus struct {
 	Server string
 	// Override 是代理绕过列表；macOS 下 networksetup 不提供该信息，保持为空。
 	Override string
+	// kind 记录 Status 检测到的代理类型（webproxy / socksfirewallproxy）。
+	// RestoreOriginal 依赖它恢复同类代理，避免把用户的 SOCKS 系统代理
+	// 恢复成 HTTP 代理（浏览器会向 SOCKS 端口发 CONNECT 而全部失败）。
+	kind string
 }
 
 // Manager 是系统代理管理器。
@@ -99,11 +103,13 @@ func (m *Manager) Status() SystemProxyStatus {
 	status := SystemProxyStatus{}
 	if en, host, port := darwinGetProxy("webproxy"); en {
 		status.Enabled = true
+		status.kind = "webproxy"
 		status.Server = net.JoinHostPort(host, strconv.Itoa(port))
 	}
 	if !status.Enabled {
 		if en, host, port := darwinGetProxy("socksfirewallproxy"); en {
 			status.Enabled = true
+			status.kind = "socksfirewallproxy"
 			status.Server = net.JoinHostPort(host, strconv.Itoa(port))
 		}
 	}
@@ -138,7 +144,8 @@ func darwinSetProxy(kind string, enable bool, host string, port int) error {
 // Set 按给定状态写入系统代理设置。
 //
 // 启用代理时 server 必须是非空的 host:port 地址；启用会同时设置
-// webproxy 与 securewebproxy，关闭则把两者都置为 off。
+// webproxy 与 securewebproxy 并关闭 socksfirewallproxy（两者并存时
+// 系统行为未定义），关闭则把三者都置为 off。
 func (m *Manager) Set(enable bool, server string) error {
 	if enable {
 		host, portStr, err := net.SplitHostPort(strings.TrimSpace(server))
@@ -155,11 +162,17 @@ func (m *Manager) Set(enable bool, server string) error {
 		if err := darwinSetProxy("securewebproxy", true, host, port); err != nil {
 			return err
 		}
+		if err := darwinSetProxy("socksfirewallproxy", false, "", 0); err != nil {
+			return err
+		}
 	} else {
 		if err := darwinSetProxy("webproxy", false, "", 0); err != nil {
 			return err
 		}
 		if err := darwinSetProxy("securewebproxy", false, "", 0); err != nil {
+			return err
+		}
+		if err := darwinSetProxy("socksfirewallproxy", false, "", 0); err != nil {
 			return err
 		}
 	}
@@ -195,7 +208,8 @@ func (m *Manager) SaveOriginal() error {
 
 // RestoreOriginal 把系统代理恢复为 SaveOriginal 记录的状态。
 //
-// 未调用过 SaveOriginal 时为空操作。
+// 未调用过 SaveOriginal 时为空操作。原状态是 SOCKS 代理时按 SOCKS 恢复，
+// 而不是走 Set 的 webproxy 路径。
 func (m *Manager) RestoreOriginal() error {
 	m.mu.Lock()
 	original := m.original
@@ -204,6 +218,21 @@ func (m *Manager) RestoreOriginal() error {
 		return nil
 	}
 	if original.Enabled {
+		if original.kind == "socksfirewallproxy" {
+			host, portStr, err := net.SplitHostPort(original.Server)
+			if err != nil {
+				return fmt.Errorf("[sysproxy] invalid original server %q: %w", original.Server, err)
+			}
+			port, err := strconv.Atoi(portStr)
+			if err != nil || port < 1 || port > 65535 {
+				return fmt.Errorf("[sysproxy] invalid original port in %q", original.Server)
+			}
+			if err := darwinSetProxy("socksfirewallproxy", true, host, port); err != nil {
+				return err
+			}
+			m.invalidateCache()
+			return nil
+		}
 		return m.Set(true, original.Server)
 	}
 	return m.Set(false, "")

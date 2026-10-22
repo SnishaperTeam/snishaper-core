@@ -1,4 +1,4 @@
-//go:build !windows && !linux
+//go:build !windows
 
 package tlsfrag
 
@@ -9,7 +9,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// SendWithOOB sends data plus one urgent MSG_OOB byte via the Unix socket API.
+// SendWithOOB writes data followed by an out-of-band byte (MSG_OOB) on a
+// single send, the TLS-RF fragmentation trick.
 func SendWithOOB(conn net.Conn, data []byte, oob byte) error {
 	rawConn, err := GetRawConn(conn)
 	if err != nil {

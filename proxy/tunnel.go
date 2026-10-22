@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -177,89 +178,6 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 	}
 }
 
-func (p *ProxyServer) directConnect(w http.ResponseWriter, req *http.Request) {
-	targetAuthority := req.URL.Host
-	if targetAuthority == "" {
-		targetAuthority = req.Host
-	}
-	targetAddr := ensureAddrWithPort(targetAuthority, "443")
-
-	p.tracef("[Direct] Connecting to %s", targetAddr)
-
-	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-
-	// TUN 模式下绑定物理网卡，避免出站流量被 TUN 捕获
-	p.mu.RLock()
-	tunMode := p.tunMode
-	p.mu.RUnlock()
-	if tunMode {
-		if localAddr := p.getPhysicalLocalAddr(targetAddr); localAddr != nil {
-			dialer.LocalAddr = localAddr
-		}
-		// 绑源地址不够，必须同时绑接口索引，否则内核仍可能把包送回 TUN。
-		if control := p.getPhysicalDialControl(targetAddr); control != nil {
-			dialer.Control = control
-		}
-	}
-
-	conn, err := dialer.Dial("tcp", targetAddr)
-	if err != nil {
-		http.Error(w, "Failed to connect", http.StatusBadGateway)
-		return
-	}
-
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Hijack not supported", http.StatusInternalServerError)
-		conn.Close()
-		return
-	}
-
-	clientConn, rw, err := hijacker.Hijack()
-	if err != nil {
-		conn.Close()
-		return
-	}
-	if _, err := rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
-		clientConn.Close()
-		conn.Close()
-		return
-	}
-	if err := rw.Flush(); err != nil {
-		clientConn.Close()
-		conn.Close()
-		return
-	}
-	clientConn = wrapHijackedConn(clientConn, rw)
-	_ = clientConn.SetDeadline(time.Time{})
-	_ = conn.SetDeadline(time.Time{})
-
-	// 双向复制数据
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	buf1 := tunnelBufPool.Get().(*[]byte)
-	buf2 := tunnelBufPool.Get().(*[]byte)
-
-	go func() {
-		defer wg.Done()
-		defer tunnelBufPool.Put(buf1)
-		io.CopyBuffer(conn, clientConn, *buf1)
-		config.HalfClose(conn)
-	}()
-	go func() {
-		defer wg.Done()
-		defer tunnelBufPool.Put(buf2)
-		io.CopyBuffer(clientConn, conn, *buf2)
-		config.HalfClose(clientConn)
-	}()
-	wg.Wait()
-	clientConn.Close()
-	conn.Close()
-}
 
 // isSelfTarget 判断请求目标地址是否为代理自身监听端口，用于阻止自连死循环。
 // 例如代理监听 127.0.0.1:8080 时，任何发往 127.0.0.1:8080 / localhost:8080 的请求都应被拒绝。
@@ -328,6 +246,51 @@ func (p *ProxyServer) isSelfTarget(host string) bool {
 	return hostOnly == selfHost
 }
 
+// candidateDial 携带单个明文 HTTP 请求的拨号候选与规则，经请求 context
+// 传给共享的 candidateTransport.DialContext。
+type candidateDial struct {
+	candidates []string
+	rule       Rule
+}
+
+type candidateDialCtxKeyType int
+
+const candidateDialCtxKey candidateDialCtxKeyType = 0
+
+// candidateDialTransport 返回唯一的 transport 克隆：DialContext 从请求
+// context 取出候选与规则逐个拨号。单实例共享让连接池可复用，替代旧的
+// 每请求克隆（每请求克隆导致连接永不复用）。
+func (p *ProxyServer) candidateDialTransport() *http.Transport {
+	p.mu.RLock()
+	t := p.candidateTransport
+	p.mu.RUnlock()
+	if t != nil {
+		return t
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.candidateTransport == nil {
+		t = p.transport.Clone()
+		t.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			cd, ok := ctx.Value(candidateDialCtxKey).(*candidateDial)
+			if !ok {
+				return nil, fmt.Errorf("no candidate dial info in request context")
+			}
+			var lastErr error
+			for _, candidate := range cd.candidates {
+				conn, err := p.dialWithRule(ctx, network, candidate, cd.rule)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			return nil, lastErr
+		}
+		p.candidateTransport = t
+	}
+	return p.candidateTransport
+}
+
 func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule Rule) {
 	newReq := req.Clone(req.Context())
 	newReq.RequestURI = ""
@@ -363,6 +326,12 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 			httpsURL.Host = req.Host
 		}
 		http.Redirect(w, req, httpsURL.String(), http.StatusMovedPermanently)
+		return
+	}
+
+	if strings.EqualFold(strings.TrimSpace(rule.Mode), "block") {
+		p.tracef("[HTTP] Refused request to %s: blocked by rule", newReq.URL.Host)
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -408,20 +377,12 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 		targetAddr := ensureAddrWithPort(newReq.URL.Host, defaultPort)
 		dialCandidates := p.buildDialCandidates(req.Context(), normalizeHost(newReq.Host), targetAddr, rule, rule.Mode)
 		if len(dialCandidates) > 0 && dialCandidates[0] != targetAddr {
-			t := p.transport.Clone()
-			candidateSet := dedupeDialCandidates(dialCandidates)
-			t.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
-				var lastErr error
-				for _, candidate := range candidateSet {
-					conn, err := p.dialWithRule(ctx, network, candidate, rule)
-					if err == nil {
-						return conn, nil
-					}
-					lastErr = err
-				}
-				return nil, lastErr
-			}
-			transport = t
+			transport = p.candidateDialTransport()
+			ctx := context.WithValue(newReq.Context(), candidateDialCtxKey, &candidateDial{
+				candidates: dedupeDialCandidates(dialCandidates),
+				rule:       rule,
+			})
+			newReq = newReq.WithContext(ctx)
 		}
 	}
 

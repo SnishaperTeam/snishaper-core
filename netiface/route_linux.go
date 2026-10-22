@@ -4,7 +4,6 @@ package netiface
 
 import (
 	"net"
-	"net/netip"
 
 	"github.com/vishvananda/netlink"
 )
@@ -48,24 +47,4 @@ func familyLinkFamily(family int) int {
 		return netlink.FAMILY_V6
 	}
 	return netlink.FAMILY_V4
-}
-
-// defaultRouteGateways returns the gateway address of each default route, used
-// for diagnostics.
-func defaultRouteGateways(family int) map[int]netip.Addr {
-	out := make(map[int]netip.Addr)
-
-	routes, err := netlink.RouteList(nil, familyLinkFamily(family))
-	if err != nil {
-		return out
-	}
-	for _, route := range routes {
-		if route.LinkIndex <= 0 || !isDefaultDestination(route.Dst) || route.Gw == nil {
-			continue
-		}
-		if parsed, ok := netip.AddrFromSlice(route.Gw); ok {
-			out[route.LinkIndex] = parsed.Unmap()
-		}
-	}
-	return out
 }

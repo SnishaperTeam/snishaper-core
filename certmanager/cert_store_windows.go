@@ -3,12 +3,9 @@
 package certmanager
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"strings"
 
 	"github.com/SnishaperTeam/snishaper-core/config"
@@ -34,13 +31,23 @@ func platformCACertInstalled(brand config.Brand, thumbprint string) bool {
 
 	// Run native certutil to check if the cert thumbprint exists in the User
 	// Root or CA store. This avoids any PowerShell ExecutionPolicy restriction
-	// issues and does not require temp files.
+	// issues and does not require temp files. The install help tells users they
+	// may import to 本地计算机 (LocalMachine), so the machine stores are checked
+	// too — otherwise a correct LocalMachine install reads as "untrusted".
 	outputRoot, _ := outputHiddenCommand("certutil", "-user", "-store", "root", thumbprint)
 	if strings.Contains(clean(string(outputRoot)), cleanThumb) {
 		return true
 	}
 	outputCA, _ := outputHiddenCommand("certutil", "-user", "-store", "ca", thumbprint)
-	return strings.Contains(clean(string(outputCA)), cleanThumb)
+	if strings.Contains(clean(string(outputCA)), cleanThumb) {
+		return true
+	}
+	outputLMRoot, _ := outputHiddenCommand("certutil", "-store", "root", thumbprint)
+	if strings.Contains(clean(string(outputLMRoot)), cleanThumb) {
+		return true
+	}
+	outputLMCA, _ := outputHiddenCommand("certutil", "-store", "ca", thumbprint)
+	return strings.Contains(clean(string(outputLMCA)), cleanThumb)
 }
 
 func platformListCerts(brand config.Brand) ([]InstalledCert, error) {
@@ -112,7 +119,6 @@ func platformInstallCA(_ config.Brand, caPath string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to install CA certificate: %w", err)
 	}
-	fmt.Println("[Cert] CA certificate installed successfully to CurrentUser Root store")
 	return nil
 }
 
@@ -136,8 +142,6 @@ func platformUninstallCert(_ config.Brand, storeLocation, storeName, thumbprint 
 	return runHiddenCommand("certutil", args...)
 }
 
-var sha1ThumbprintPattern = regexp.MustCompile(`(?i)[A-F0-9]{40}`)
-
 // escapePowerShellPattern makes an arbitrary product name safe to embed in a
 // PowerShell single-quoted -match pattern: regex metacharacters are escaped and
 // a single quote is doubled (the only way to escape it inside '...').
@@ -160,79 +164,4 @@ func escapePowerShellPattern(name string) string {
 		`'`, `''`,
 	)
 	return replacer.Replace(name)
-}
-
-// matchesBrandText is defined once in cert.go: both the Linux anchor scan and
-// the Windows dump parser share it.
-
-func parseCertutilStoreOutput(brand config.Brand, output []byte, storeLocation, storeName string) []InstalledCert {
-	scanner := bufio.NewScanner(bytes.NewReader(output))
-	var blocks [][]string
-	var current []string
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.Contains(line, "====") {
-			if len(current) > 0 {
-				blocks = append(blocks, current)
-			}
-			current = []string{line}
-			continue
-		}
-		if len(current) > 0 {
-			current = append(current, line)
-		}
-	}
-	if len(current) > 0 {
-		blocks = append(blocks, current)
-	}
-
-	var certs []InstalledCert
-	for _, block := range blocks {
-		joined := strings.Join(block, "\n")
-		if !matchesBrandText(brand, joined) {
-			continue
-		}
-
-		var subject string
-		var notAfter string
-		var thumbprint string
-
-		for _, line := range block {
-			lower := strings.ToLower(line)
-			if subject == "" && matchesBrandText(brand, lower) {
-				if idx := strings.Index(line, ":"); idx >= 0 && idx+1 < len(line) {
-					subject = strings.TrimSpace(line[idx+1:])
-				}
-			}
-			if notAfter == "" && strings.Contains(lower, "notafter:") {
-				if idx := strings.Index(line, ":"); idx >= 0 && idx+1 < len(line) {
-					notAfter = strings.TrimSpace(line[idx+1:])
-				}
-			}
-			if thumbprint == "" {
-				if match := sha1ThumbprintPattern.FindString(line); match != "" {
-					thumbprint = strings.ToUpper(match)
-				}
-			}
-		}
-
-		if thumbprint == "" {
-			continue
-		}
-		if subject == "" {
-			subject = brand.Display() + " CA"
-		}
-
-		certs = append(certs, InstalledCert{
-			Subject:       subject,
-			Thumbprint:    thumbprint,
-			NotAfter:      notAfter,
-			StoreName:     storeName,
-			StoreLocation: storeLocation,
-			Token:         storeLocation + "|" + storeName + "|" + thumbprint,
-		})
-	}
-
-	return certs
 }

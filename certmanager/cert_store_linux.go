@@ -100,12 +100,7 @@ func platformInstallCA(brand config.Brand, caPath string) error {
 	if err := os.WriteFile(target, data, 0644); err != nil {
 		return fmt.Errorf("write %s: %w", target, err)
 	}
-	if err := publishAnchors(); err != nil {
-		return err
-	}
-
-	fmt.Println("[Cert] CA certificate installed successfully to " + target)
-	return nil
+	return publishAnchors()
 }
 
 func platformUninstallCert(brand config.Brand, _, _, thumbprint string) error {
@@ -134,7 +129,6 @@ func platformUninstallCert(brand config.Brand, _, _, thumbprint string) error {
 	// or left over from an older anchor name) is nothing this app owns, so
 	// leaving it alone is the safe answer.
 	if removed == 0 {
-		fmt.Println("[Cert] no matching anchor file for " + thumbprint)
 		return nil
 	}
 	if err := publishAnchors(); err != nil {
@@ -142,7 +136,6 @@ func platformUninstallCert(brand config.Brand, _, _, thumbprint string) error {
 	}
 	prunePublishedLinks()
 
-	fmt.Printf("[Cert] removed %d anchor file(s) for %s\n", removed, thumbprint)
 	return nil
 }
 
@@ -299,9 +292,7 @@ func prunePublishedLinks() {
 			if _, err := os.Stat(target); err == nil {
 				continue
 			}
-			if err := os.Remove(link); err != nil {
-				fmt.Printf("[Cert] could not remove stale link %s: %v\n", link, err)
-			}
+			_ = os.Remove(link)
 		}
 	}
 }

@@ -76,7 +76,7 @@ func (rm *RuleManager) saveSyncState(state rulesSyncState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(rm.syncStatePath(), data, 0644)
+	return writeFileAtomic(rm.syncStatePath(), data, 0644)
 }
 
 // RemoteRulesHash reports the hash of the rules file revision that was applied

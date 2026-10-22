@@ -29,19 +29,6 @@ func outputHiddenCommand(name string, args ...string) ([]byte, error) {
 	return cmd.Output()
 }
 
-// startHiddenCommand 启动命令并隐藏窗口
-func startHiddenCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	hideWindow(cmd)
-	return cmd.Start()
-}
-// startVisibleCommand 启动命令并显示窗口
-func startVisibleCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	// 不设置 HideWindow = true
-	return cmd.Start()
-}
-
 func runElevatedCommand(name string, args ...string) error {
 	escape := func(s string) string {
 		return strings.ReplaceAll(s, "'", "''")
@@ -52,8 +39,11 @@ func runElevatedCommand(name string, args ...string) error {
 		quotedArgs = append(quotedArgs, fmt.Sprintf("'%s'", escape(arg)))
 	}
 
+	// -ErrorAction Stop makes a declined UAC prompt a terminating error, and
+	// the null check keeps a missing $p from exiting 0 — without both, the
+	// caller is told the elevated command succeeded when it never ran.
 	psScript := fmt.Sprintf(
-		"$p = Start-Process -FilePath '%s' -ArgumentList @(%s) -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+		"$p = Start-Process -FilePath '%s' -ArgumentList @(%s) -Verb RunAs -Wait -PassThru -ErrorAction Stop; if ($null -eq $p) { exit 1 }; exit $p.ExitCode",
 		escape(name),
 		strings.Join(quotedArgs, ","),
 	)

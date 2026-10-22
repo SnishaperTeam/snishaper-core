@@ -4,15 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"time"
 
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/protocol/socks"
 )
-
-// udpIdle bounds a single UDP read so a silent peer cannot pin a socket.
-const udpIdle = 30 * time.Second
 
 // ListenPacketUDP opens a UDP tunnel to destination through the node.
 //
@@ -29,8 +25,7 @@ func (n Node) ListenPacketUDP(ctx context.Context, destination M.Socksaddr) (N.P
 	}
 
 	// Subscription nodes relay UDP through the Clash core adapters too
-	// (mihomo.go); the hand-rolled cases below apply only to nodes built
-	// without raw config.
+	// (mihomo.go).
 	if n.Raw != nil {
 		return n.listenPacketMihomoUDP(ctx, host, port)
 	}
@@ -63,47 +58,8 @@ func (n Node) ListenPacketUDP(ctx context.Context, destination M.Socksaddr) (N.P
 		// be handed to sing-tun directly.
 		return n.wgListenPacket(ctx)
 
-	case "vmess":
-		return dialVMessUDP(n)
-
-	case "vless":
-		return dialVLessUDP(n)
-
-	case "ss", "ssr":
-		// Shadowsocks relays UDP by sealing each datagram under its own salt.
-		inner, err := net.ListenUDP("udp", nil)
-		if err != nil {
-			return nil, fmt.Errorf("ss: opening udp socket failed: %w", err)
-		}
-		conn, err := dialShadowsocksUDP(inner, n)
-		if err != nil {
-			inner.Close()
-			return nil, err
-		}
-		return conn, nil
-
-	case "hysteria2", "hy2":
-		return dialHysteriaUDP(ctx, n, host, port)
-
-	case "tuic":
-		return dialTUICUDP(ctx, n, host, port)
-
-	case "trojan":
-		// Trojan carries UDP over the TCP stream with its own framing, and it
-		// always runs inside TLS. The handshake terminates at the node's own
-		// server, so the SNI must never fall back to the UDP target host.
-		raw, err := net.DialTimeout("tcp", net.JoinHostPort(n.Server, fmt.Sprint(n.Port)), defaultDialTimeout)
-		if err != nil {
-			return nil, err
-		}
-		secure, err := wrapTLS(raw, n, "", true)
-		if err != nil {
-			return nil, err
-		}
-		return dialTrojanUDP(secure, n, host, port)
-
 	default:
-		return nil, fmt.Errorf("node %q: udp relay is not implemented for %s", n.Name, n.Type)
+		return nil, fmt.Errorf("node %q: hand-built %s udp relay is no longer supported; import via subscription", n.Name, n.Type)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -88,10 +89,19 @@ type migrationSessionResponse struct {
 	TargetIP    string `json:"target_ip"`
 }
 
-func setUnexportedField[T any](obj any, fieldName string, value T) {
-	if f := reflect.ValueOf(obj).Elem().FieldByName(fieldName); f.IsValid() {
-		*(*T)(unsafe.Pointer(f.UnsafeAddr())) = value
+// errMigrationStateIncompatible 表示 crypto/tls.SessionState 缺少迁移依赖的
+// 非导出字段（Go 版本变化），会话票据无法安全重建。
+var errMigrationStateIncompatible = errors.New("migration session state incompatible with this Go crypto/tls")
+
+// setUnexportedField 写入 crypto/tls.SessionState 的非导出字段。字段缺失时
+// 返回错误而不是静默跳过：半初始化的票据会在握手里变成静默的坏连接。
+func setUnexportedField[T any](obj any, fieldName string, value T) error {
+	f := reflect.ValueOf(obj).Elem().FieldByName(fieldName)
+	if !f.IsValid() {
+		return fmt.Errorf("%w: missing field %q", errMigrationStateIncompatible, fieldName)
 	}
+	*(*T)(unsafe.Pointer(f.UnsafeAddr())) = value
+	return nil
 }
 
 func buildMigrationSessionState(brand config.Brand, resp migrationSessionResponse) (*tls.ClientSessionState, error) {
@@ -105,17 +115,30 @@ func buildMigrationSessionState(brand config.Brand, resp migrationSessionRespons
 	}
 
 	state := &tls.SessionState{}
-	setUnexportedField(state, "secret", secretBytes)
-	setUnexportedField(state, "version", resp.Version)
-	setUnexportedField(state, "cipherSuite", resp.CipherSuite)
-	setUnexportedField(state, "isClient", true)
-	setUnexportedField(state, "createdAt", uint64(time.Now().Unix()))
-	setUnexportedField(state, "extMasterSecret", true)
+	if err := setUnexportedField(state, "secret", secretBytes); err != nil {
+		return nil, err
+	}
+	if err := setUnexportedField(state, "version", resp.Version); err != nil {
+		return nil, err
+	}
+	if err := setUnexportedField(state, "cipherSuite", resp.CipherSuite); err != nil {
+		return nil, err
+	}
+	if err := setUnexportedField(state, "isClient", true); err != nil {
+		return nil, err
+	}
+	if err := setUnexportedField(state, "createdAt", uint64(time.Now().Unix())); err != nil {
+		return nil, err
+	}
+	if err := setUnexportedField(state, "extMasterSecret", true); err != nil {
+		return nil, err
+	}
 
 	// Populate PeerCertificates with a dummy self-signed cert to avoid panics.
+	// 尽力而为：证书缺失只会影响个别 API，不作为致命错误。
 	if dummy, err := generateMigrationDummyCert(brand); err == nil {
 		if parsed, err := x509.ParseCertificate(dummy.Certificate[0]); err == nil {
-			setUnexportedField(state, "peerCertificates", []*x509.Certificate{parsed})
+			_ = setUnexportedField(state, "peerCertificates", []*x509.Certificate{parsed})
 		}
 	}
 
@@ -208,6 +231,13 @@ func (p *ProxyServer) handleMigration(clientConn net.Conn, host, port string, ru
 			if apiErr != nil {
 				p.tracef("[Migration] Ticket fetch failed: %v", apiErr)
 				cache.setActiveHost("")
+				if errors.Is(apiErr, errMigrationStateIncompatible) {
+					// 会话状态无法安全重建：放弃迁移，退回普通（非迁移）
+					// 拨号路径，而不是拿半残票据继续。
+					p.tracef("[Migration] Session state incompatible, falling back to normal dial for %s", host)
+					p.migrationFallbackDial(clientConn, host, port, rule)
+					return
+				}
 				if attempt == 2 {
 					_, _ = clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nFailed to acquire session ticket"))
 					clientConn.Close()
@@ -311,6 +341,19 @@ func (p *ProxyServer) handleMigration(clientConn net.Conn, host, port string, ru
 
 	// Fallback: raw tunnel (browser sees upstream TLS as-is)
 	p.directTunnel(clientConn, upstreamConn)
+}
+
+// migrationFallbackDial abandons session resumption and handles the flow the
+// way the non-migration path would: plain dial + transparent tunnel.
+func (p *ProxyServer) migrationFallbackDial(clientConn net.Conn, host, port string, rule Rule) {
+	targetAddr := net.JoinHostPort(host, port)
+	cr := p.prepareConnect(host, targetAddr, rule)
+	if err := p.dialUpstream(cr); err != nil {
+		_, _ = clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nUpstream connect failed"))
+		clientConn.Close()
+		return
+	}
+	p.handleTransparent(clientConn, cr.conn, host, rule)
 }
 
 // resolveMigrationIP resolves the target host to an IP.

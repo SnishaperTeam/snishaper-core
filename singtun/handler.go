@@ -72,6 +72,11 @@ type Handler struct {
 	livePacket map[N.PacketConn]struct{}
 	closed     bool
 	wg         sync.WaitGroup
+	// dnsRealSem 限制非 A/AAAA 查询的并发 DoH 解析数（见 dispatchDNSRealPacket）。
+	dnsRealSem chan struct{}
+	// dnsWriteMu 序列化 NewDNSPacket 异步应答对 sing-tun writer 的并发写
+	// （该 writer 未承诺 goroutine-safe；Windows 上此路径不触发，仅兜底）。
+	dnsWriteMu sync.Mutex
 }
 
 // UDPRelay resolves a UDP tunnel for a destination. It is implemented by the
@@ -240,12 +245,13 @@ func (h *Handler) liveCounts() (tcp, udp int) {
 // NewHandler 创建新的 Handler
 func NewHandler(proxyAddr string, resolver *dohresolver.FailoverResolver, logf func(string)) *Handler {
 	h := &Handler{
-		proxyAddr: proxyAddr,
-		resolver:  resolver,
-		fakeIP:    NewFakeIPStore(),
-		logf:      logf,
-		logger:    newBridgedLogger(logf),
-		iface:     netiface.NewSelector(),
+		proxyAddr:  proxyAddr,
+		resolver:   resolver,
+		fakeIP:     NewFakeIPStore(),
+		logf:       logf,
+		logger:     newBridgedLogger(logf),
+		iface:      netiface.NewSelector(),
+		dnsRealSem: make(chan struct{}, dnsRealConcurrency),
 	}
 	// UDP 中继空闲自毁上限，默认 120s（详见字段注释）。
 	h.udpIdleSessionTTL.Store(int64(120 * time.Second))
@@ -275,7 +281,21 @@ func (h *Handler) JudgeFlow(network uint8, source netip.AddrPort, destination ne
 
 // NewDNSPacket 处理 TUN 捕获的原始 DNS 请求报文。
 func (h *Handler) NewDNSPacket(payload []byte, source M.Socksaddr, destination M.Socksaddr, writer N.PacketWriter) {
-	h.handleRawDNSPacket(payload, source, destination, writer)
+	// 非 A/AAAA 查询的 DoH 解析可能异步执行（dispatchDNSRealPacket），
+	// sing-tun 的 writer 未承诺 goroutine-safe，这里用共享锁串行化应答写。
+	h.handleRawDNSPacket(payload, source, destination, &lockedPacketWriter{mu: &h.dnsWriteMu, inner: writer})
+}
+
+// lockedPacketWriter 用外部锁串行化对 inner 的并发 WritePacket。
+type lockedPacketWriter struct {
+	mu    *sync.Mutex
+	inner N.PacketWriter
+}
+
+func (w *lockedPacketWriter) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.inner.WritePacket(buffer, destination)
 }
 
 // NewConnectionEx 处理新的 TCP 连接
@@ -581,6 +601,9 @@ func (h *Handler) serveDNSOverStream(ctx context.Context, conn net.Conn, source 
 
 type dnsStreamWriter struct {
 	conn net.Conn
+	// mu：非 A/AAAA 应答改为异步后，多个 goroutine 可能并发写同一 TCP 流，
+	// 不加锁会交错破坏 RFC 7766 帧边界。
+	mu sync.Mutex
 }
 
 // WritePacket 以 DNS over TCP 帧格式写回响应。
@@ -599,16 +622,22 @@ func (w *dnsStreamWriter) WritePacket(buffer *buf.Buffer, destination M.Socksadd
 	if err := w.conn.SetWriteDeadline(time.Now().Add(dnsRelayWriteTimeout)); err != nil {
 		return err
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	_, err := w.conn.Write(out)
 	return err
 }
 
 type packetConnDNSWriter struct {
 	conn N.PacketConn
+	// mu：异步 DoH 应答可能并发写同一 packet conn，串行化以策安全。
+	mu sync.Mutex
 }
 
 // WritePacket 将 DNS 响应包写入底层包连接。
 func (w *packetConnDNSWriter) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	return w.conn.WritePacket(buffer, destination)
 }
 
@@ -616,6 +645,13 @@ const (
 	dnsRelayReadTimeout  = 5 * time.Second
 	dnsRelayWriteTimeout = 5 * time.Second
 	dnsResolveTimeout    = 5 * time.Second
+	// dnsRealConcurrency 限制非 A/AAAA 查询并发 DoH 解析的 goroutine 数，
+	// 防止慢上游下无界 goroutine 增长；DNS ID 保证应答乱序安全。
+	dnsRealConcurrency = 32
+	// fakeIPTTL 是 fake-ip 应答的 TTL。必须远小于池回绕周期：池回绕后
+	// 旧 IP 被重新分配给新域名，OS 仍缓存旧 A 记录时会发生误绑定；
+	// TTL 越短，误绑定窗口越小。
+	fakeIPTTL = 60
 )
 
 // serveDNSOverPacketConn 读取 UDP DNS 查询并把应答写回客户端。
@@ -656,9 +692,10 @@ func (h *Handler) serveDNSOverPacketConn(ctx context.Context, conn N.PacketConn,
 				}
 				return
 			}
-			payload := append([]byte(nil), packetBuf.Bytes()...)
+			// handleRawDNSPacket 同步消费 payload（Unpack 后不再引用），
+			// 异步 DoH 分支只持有已解析的 msg，因此无需复制。
+			h.handleRawDNSPacket(packetBuf.Bytes(), source, destination, writer)
 			packetBuf.Release()
-			h.handleRawDNSPacket(payload, source, destination, writer)
 		}
 	}()
 }
@@ -719,7 +756,7 @@ func (h *Handler) handleRawDNSPacket(payload []byte, source M.Socksaddr, destina
 	domain := dns.CanonicalName(question.Name)
 
 	if question.Qtype != dns.TypeA && question.Qtype != dns.TypeAAAA {
-		h.handleDNSRealPacket(msg, domain, destination, writer)
+		h.dispatchDNSRealPacket(msg, domain, destination, writer)
 		return
 	}
 
@@ -750,7 +787,7 @@ func (h *Handler) handleRawDNSPacket(payload []byte, source M.Socksaddr, destina
 				Name:   domain,
 				Rrtype: dns.TypeA,
 				Class:  dns.ClassINET,
-				Ttl:    300,
+				Ttl:    fakeIPTTL,
 			},
 			A: AsNetIP(fakeIP).To4(),
 		})
@@ -760,7 +797,7 @@ func (h *Handler) handleRawDNSPacket(payload []byte, source M.Socksaddr, destina
 				Name:   domain,
 				Rrtype: dns.TypeAAAA,
 				Class:  dns.ClassINET,
-				Ttl:    300,
+				Ttl:    fakeIPTTL,
 			},
 			AAAA: AsNetIP(fakeIP).To16(),
 		})
@@ -809,6 +846,23 @@ func (h *Handler) serveDNSFailure(msg *dns.Msg, destination M.Socksaddr, writer 
 	respBuf.Write(respBytes)
 	if writeErr := writer.WritePacket(respBuf, destination); writeErr != nil {
 		h.logger.Warn("failed to write DNS error response", "error", writeErr)
+	}
+}
+
+// dispatchDNSRealPacket 把非 A/AAAA 查询的同步 DoH 解析移出读循环：
+// Chrome 的 HTTPS/type-65 查询高频出现，一次慢 DoH 会把整个 DNS 连接
+// 及其后续流水化查询全部拖住。有信号量空位时异步执行（DNS ID 保证
+// 应答乱序安全），占满时退回同步执行（保持旧行为）。
+// msg 已 Unpack 完成，不持有调用方的 payload 缓冲，异步安全。
+func (h *Handler) dispatchDNSRealPacket(msg *dns.Msg, domain string, destination M.Socksaddr, writer N.PacketWriter) {
+	select {
+	case h.dnsRealSem <- struct{}{}:
+		go func() {
+			defer func() { <-h.dnsRealSem }()
+			h.handleDNSRealPacket(msg, domain, destination, writer)
+		}()
+	default:
+		h.handleDNSRealPacket(msg, domain, destination, writer)
 	}
 }
 
@@ -1064,17 +1118,8 @@ func (h *Handler) forwardUDPDirect(ctx context.Context, conn N.PacketConn, sourc
 		return
 	}
 
-	// 解析目标地址
-	destAddr := destination.String()
-	destUDPAddr, err := net.ResolveUDPAddr(network, destAddr)
-	if err != nil {
-		h.logger.Warn("failed to resolve dest", "error", err)
-		remoteConn.Close()
-		if onClose != nil {
-			onClose(err)
-		}
-		return
-	}
+	// 目标地址已是类型化的 Socksaddr，直接转 UDPAddr，无需字符串往返再解析。
+	destUDPAddr := destination.UDPAddr()
 
 	// 3. 转发数据包（双向独立中继）
 	// ★ 必须是两个独立方向的 goroutine 并发转发：

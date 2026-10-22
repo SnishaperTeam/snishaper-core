@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SnishaperTeam/snishaper-core/config"
@@ -43,6 +44,9 @@ type CloudflarePool struct {
 	// IP 拉取新鲜度：记录上次成功拉取时间
 	lastFetchTime time.Time
 	nat64Prefix   string
+
+	// rechecking 防止故障风暴触发并发全池重查：置位时跳过新的重查
+	rechecking atomic.Bool
 }
 
 // SetNAT64Prefix sets the prefix used to synthesize NAT64 addresses for pool IPs.
@@ -163,7 +167,7 @@ func (p *CloudflarePool) UpdateIPs(ips []string) {
 	p.mu.Unlock()
 
 	// Trigger check when IP list is updated
-	go p.checkAllIPs()
+	p.spawnCheck()
 }
 
 // GetAllIPs returns every IP in the pool, best-first: active IPs ordered by
@@ -226,17 +230,34 @@ func (p *CloudflarePool) GetAllIPsWithStats() []*IPStats {
 	return stats
 }
 
+// spawnCheck 在 WaitGroup 下启动一次全池健康检查，Stop 会等它结束。
+func (p *CloudflarePool) spawnCheck() {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.checkAllIPs()
+	}()
+}
+
 func (p *CloudflarePool) healthCheckLoop() {
 	// Initial check on startup
-	go p.checkAllIPs()
+	p.spawnCheck()
 
-	// Wait for stop signal
-	<-p.stopChan
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			p.spawnCheck()
+		case <-p.stopChan:
+			return
+		}
+	}
 }
 
 // TriggerHealthCheck wakes the background loop for an immediate health-check pass.
 func (p *CloudflarePool) TriggerHealthCheck() {
-	go p.checkAllIPs()
+	p.spawnCheck()
 }
 
 // RemoveInvalidIPs drops IPs that failed health checks and returns how many were removed.
@@ -265,9 +286,13 @@ func (p *CloudflarePool) ReportFailure(ip string) {
 		stats.LatencyVal += 1000 * time.Millisecond // Penalize latency
 		stats.Latency = stats.LatencyVal.String()
 
-		// Trigger incremental check when failures reach threshold
-		if stats.Failures >= 2 {
-			go p.checkIncremental()
+		// Trigger incremental check when failures reach threshold;
+		// 已有重查在跑时跳过，避免网络抖动引发并发全池重查风暴
+		if stats.Failures >= 2 && p.rechecking.CompareAndSwap(false, true) {
+			go func() {
+				defer p.rechecking.Store(false)
+				p.checkIncremental()
+			}()
 		}
 	}
 	// 清空最快 IP 缓存，迫使下一次连接重新竞速
@@ -472,17 +497,40 @@ func (p *CloudflarePool) DialParallel(ctx context.Context, network string, port 
 	raceCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// 竞速收尾：置位 raceOver 后拨号协程不再写入 resChan（未消费的连接自行关闭），
+	// 再非阻塞排空通道中已入队的结果，彻底关闭竞速输家的连接，避免每次竞速泄漏 FD。
+	var raceMu sync.Mutex
+	raceOver := false
+	defer func() {
+		raceMu.Lock()
+		raceOver = true
+		raceMu.Unlock()
+		for {
+			select {
+			case res := <-resChan:
+				if res.err == nil && res.conn != nil {
+					res.conn.Close()
+				}
+			default:
+				return
+			}
+		}
+	}()
+
 	for _, c := range candidates {
 		go func(item mappedCandidate) {
 			dialer := &net.Dialer{Timeout: 3 * time.Second}
 			conn, err := dialer.DialContext(raceCtx, network, net.JoinHostPort(item.mappedIP, port))
-			select {
-			case resChan <- dialResult{conn: conn, mappedIP: item.mappedIP, rawIP: item.rawIP, err: err}:
-			case <-raceCtx.Done():
+			raceMu.Lock()
+			if raceOver {
+				raceMu.Unlock()
 				if conn != nil {
 					conn.Close()
 				}
+				return
 			}
+			resChan <- dialResult{conn: conn, mappedIP: item.mappedIP, rawIP: item.rawIP, err: err}
+			raceMu.Unlock()
 		}(c)
 	}
 
@@ -502,10 +550,9 @@ func (p *CloudflarePool) DialParallel(ctx context.Context, network string, port 
 					winningConn = res.conn
 					winningAddr = net.JoinHostPort(res.mappedIP, port)
 					winningRawIP = res.rawIP
-					cancel() // 取消其他竞速协程的拨号
-					// 取消后其余协程会走 <-raceCtx.Done() 分支，不再写入 resChan。
-					// 必须立刻停止收集，否则会永远等待这些不会到来的结果。
-					break collect
+				cancel() // 取消其他竞速协程的拨号
+				// 拿到赢家立刻停止收集，尽快返回；其余结果由收尾排空逻辑关闭。
+				break collect
 				}
 				res.conn.Close()
 			} else {

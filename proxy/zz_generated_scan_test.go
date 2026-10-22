@@ -247,11 +247,3 @@ func TestGenerated_spkiHashBase64(t *testing.T) {
 	_ = spkiHashBase64(nil)
 }
 
-func TestGenerated_subscriptionTargetHost(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Skipf("zero-value call panicked (not smoke-testable): subscriptionTargetHost")
-		}
-	}()
-	_, _ = subscriptionTargetHost("")
-}

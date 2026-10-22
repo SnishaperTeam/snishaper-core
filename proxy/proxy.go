@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -328,6 +329,9 @@ type ProxyServer struct {
 	dohResolver       *dohresolver.FailoverResolver
 	cfPool            *cfpool.CloudflarePool
 	transport         *http.Transport
+	// candidateTransport 是 transport 的懒加载克隆，DialContext 按"请求上下文
+	// 携带的候选+规则"拨号；所有明文 HTTP 请求共享它以复用连接池（受 p.mu 保护）。
+	candidateTransport *http.Transport
 	logCallback       func(string)
 	logger            log.Logger
 	bytesDown         int64
@@ -717,6 +721,10 @@ func (p *ProxyServer) Start() error {
 	if p.running {
 		p.mu.Unlock()
 		return nil
+	}
+	if p.rules == nil {
+		p.mu.Unlock()
+		return errors.New("proxy: rule manager not set; use WithRuleManager or SetRuleManager")
 	}
 
 	if p.cfPool != nil {

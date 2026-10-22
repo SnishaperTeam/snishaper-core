@@ -1,52 +1,13 @@
 package subscription
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 )
-
-// echoServer accepts one connection, reads a line, and writes it back uppercased.
-func echoServer(t *testing.T, prefix string) (addr string, stop func()) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				if prefix != "" {
-					buf := make([]byte, len(prefix))
-					if _, err := io.ReadFull(c, buf); err != nil {
-						return
-					}
-					if string(buf) != prefix {
-						return
-					}
-				}
-				line, _ := readLine(c)
-				c.Write([]byte(toUpper(strings.TrimSpace(line)) + " "))
-			}(conn)
-		}
-	}()
-	return ln.Addr().String(), func() { ln.Close() }
-}
 
 func readLine(c net.Conn) (string, error) {
 	var out []byte
@@ -251,94 +212,14 @@ func httpConnectEchoServer(t *testing.T) (addr string, stop func()) {
 	return ln.Addr().String(), func() { ln.Close() }
 }
 
-func TestDialTrojanEndToEnd(t *testing.T) {
-	cert := selfSignedCert(t)
-	addr, stop := trojanEchoServerStrict(t, cert)
-	defer stop()
-
-	serverHost, serverPort := SplitHostPort(addr, 0)
-	node := Node{
-		Name: "trojan-node", Type: "trojan",
-		Server: serverHost, Port: serverPort,
-		Options: map[string]string{
-			"password":         "hunter2",
-			"skip-cert-verify": "true",
-			"servername":       "example.com",
-		},
-	}
-
-	conn, err := node.Dial("target.test", 443)
-	if err != nil {
-		t.Fatalf("dial trojan: %v", err)
-	}
-	defer conn.Close()
-
-	if _, err := conn.Write([]byte("secure\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	got, err := readUntilSpace(conn)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if got != "SECURE" {
-		t.Errorf("got %q, want SECURE", got)
-	}
-}
-
-func selfSignedCert(t *testing.T) tls.Certificate {
-	t.Helper()
-	key := make([]byte, 32)
-	rand.Read(key)
-	certPEM, keyPEM := generateSelfSigned(t, key)
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatalf("keypair: %v", err)
-	}
-	return cert
-}
-
-func TestDialShadowsocksRoundTrip(t *testing.T) {
-	key := make([]byte, 32)
-	rand.Read(key)
-
-	addr, stop := shadowsocksEchoServer(t, key, "aes-256-gcm", "password123")
-	defer stop()
-
-	serverHost, serverPort := SplitHostPort(addr, 0)
-	node := Node{
-		Name: "ss-node", Type: "ss",
-		Server: serverHost, Port: serverPort,
-		Options: map[string]string{
-			"cipher":   "aes-256-gcm",
-			"password": "password123",
-		},
-	}
-
-	conn, err := node.Dial("target.test", 443)
-	if err != nil {
-		t.Fatalf("dial ss: %v", err)
-	}
-	defer conn.Close()
-
-	if _, err := conn.Write([]byte("stream\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	got, err := readUntilSpace(conn)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if got != "STREAM" {
-		t.Errorf("got %q, want STREAM", got)
-	}
-}
-
-func TestUnsupportedCipher(t *testing.T) {
-	node := Node{
-		Name: "ss-legacy", Type: "ss", Server: "127.0.0.1", Port: 8388,
-		Options: map[string]string{"cipher": "aes-256-cfb", "password": "x"},
-	}
-	if _, err := node.Dial("a.test", 443); err == nil {
-		t.Error("expected error for legacy stream cipher")
+// TestHandBuiltCryptoProtocolsError proves the removed hand-rolled dialers
+// fail loudly instead of silently dialing out.
+func TestHandBuiltCryptoProtocolsError(t *testing.T) {
+	for _, typ := range []string{"ss", "vmess", "vless", "trojan", "tuic", "hysteria2"} {
+		node := Node{Name: "n", Type: typ, Server: "127.0.0.1", Port: 1}
+		if _, err := node.Dial("a.test", 443); err == nil {
+			t.Errorf("%s: expected an error for a hand-built node", typ)
+		}
 	}
 }
 
@@ -391,82 +272,12 @@ func TestEncodeSocks5Addr(t *testing.T) {
 	}
 }
 
-func TestShadowsocksKeyLength(t *testing.T) {
-	for _, n := range []int{16, 24, 32} {
-		if got := len(shadowsocksKey("pw", n)); got != n {
-			t.Errorf("key length = %d, want %d", got, n)
+func toUpper(s string) string {
+	out := []byte(s)
+	for i := range out {
+		if out[i] >= 'a' && out[i] <= 'z' {
+			out[i] -= 32
 		}
 	}
-}
-
-func TestParseUUID(t *testing.T) {
-	id, err := parseUUID("11111111-2222-3333-4444-555555555555")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if id[0] != 0x11 || id[15] != 0x55 {
-		t.Errorf("uuid decoded wrong: %x", id)
-	}
-	if _, err := parseUUID("short"); err == nil {
-		t.Error("expected error for short uuid")
-	}
-	if _, err := parseUUID("zzzzzzzz-2222-3333-4444-555555555555"); err == nil {
-		t.Error("expected error for non-hex uuid")
-	}
-}
-
-var (
-	certOnce sync.Once
-	certPEM  []byte
-	keyPEM   []byte
-)
-
-func generateSelfSigned(t *testing.T, key []byte) ([]byte, []byte) {
-	t.Helper()
-	certOnce.Do(func() {
-		certPEM, keyPEM = makeSelfSigned()
-	})
-	return certPEM, keyPEM
-}
-
-var _ = aes.NewCipher
-var _ = cipher.NewGCM
-var _ = sha256.Sum256
-var _ = binary.BigEndian
-var _ = fmt.Sprint
-var _ = time.Now
-
-func TestDialVMessEndToEnd(t *testing.T) {
-	cert := selfSignedCert(t)
-	addr, stop := vmessEchoServer(t, cert, true)
-	defer stop()
-
-	serverHost, serverPort := SplitHostPort(addr, 0)
-	node := Node{
-		Name: "vmess-node", Type: "vmess",
-		Server: serverHost, Port: serverPort,
-		Options: map[string]string{
-			"uuid":             testVMessUUID,
-			"method":           "auto",
-			"tls":              "true",
-			"skip-cert-verify": "true",
-			"servername":       "example.com",
-		},
-	}
-
-	conn, err := node.Dial("target.test", 443)
-	if err != nil {
-		t.Fatalf("dial vmess: %v", err)
-	}
-	defer conn.Close()
-}
-
-func TestDialVMessInvalidUUID(t *testing.T) {
-	node := Node{
-		Name: "bad", Type: "vmess", Server: "127.0.0.1", Port: 1,
-		Options: map[string]string{"uuid": "not-a-uuid"},
-	}
-	if _, err := node.Dial("a.test", 443); err == nil {
-		t.Error("expected error for invalid uuid")
-	}
+	return string(out)
 }

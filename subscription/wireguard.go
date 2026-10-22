@@ -499,8 +499,6 @@ func (wireguardErrorHandler) Warning(ctx context.Context, msg string) {}
 func (wireguardErrorHandler) Info(ctx context.Context, msg string)    {}
 func (wireguardErrorHandler) Debug(ctx context.Context, msg string)   {}
 
-var _ = time.Second
-
 // DialTimeout opens a TCP tunnel to targetHost through the WireGuard node.
 func (n Node) wgDialTCP(targetHost string, targetPort int) (net.Conn, error) {
 	d, err := acquireWireguardDialer(n)
@@ -535,9 +533,9 @@ func (n Node) wgDialTCP(targetHost string, targetPort int) (net.Conn, error) {
 
 	conn, err := d.DialTCP(ctx, addr, targetPort)
 	if err != nil {
-		// A dead tunnel must not poison the pool for later attempts.
-		_ = d.Close()
-		discardWireguardDialer(n)
+		// A refused or failed dial does not mean the tunnel is dead; keep
+		// the pooled dialer so concurrent connections through this node
+		// survive. Genuine tunnel teardown happens via Close/Stop.
 		return nil, err
 	}
 	return conn, nil

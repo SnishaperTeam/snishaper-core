@@ -71,6 +71,23 @@ func (p *ProxyServer) PlanTUNFlow(flow TUNFlow) TUNFlowPlan {
 	canMITM := protocol == "tcp"
 	udpStrategy := ""
 
+	// "block" 规则：直接拒绝该流，不解析也不产出任何出站候选，
+	// 数据面拿到空候选即无处可拨。
+	if strings.EqualFold(effectiveMode, "block") {
+		notes = append(notes, "Flow refused: host is blocked by rule; no outbound routing")
+		return TUNFlowPlan{
+			Protocol:      protocol,
+			Host:          host,
+			MatchHost:     host,
+			RuleMode:      rule.Mode,
+			EffectiveMode: effectiveMode,
+			UDPStrategy:   "drop",
+			CanMITM:       false,
+			NeedsSniffing: host == "",
+			Notes:         notes,
+		}
+	}
+
 	switch protocol {
 	case "udp":
 		canMITM = false

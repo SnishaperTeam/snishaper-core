@@ -129,7 +129,9 @@ func ConvertRules(cfg *ParsedConfig) []SiteGroup {
 		case agg.proxied:
 			mode = "mitm"
 		case agg.reject:
-			mode = "direct"
+			// REJECT must refuse the connection, not route it out directly;
+			// the proxy layer treats mode "block" as "do not connect".
+			mode = "block"
 		}
 
 		name := target

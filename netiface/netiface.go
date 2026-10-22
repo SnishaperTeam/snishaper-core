@@ -99,18 +99,17 @@ var virtualNameMarkers = []string{
 // TUNConfig.OutboundInterfaceExclude.
 var DefaultExcludedNames = []string{
 	// Tunnel / VPN / proxy devices
-	"tun2proxy*", "utun*", "tun*", "tap*", "wg*", "ppp*", "ip6tnl*", "ip6gre*",
-	"ifb*", "teql*", "gre*", "gretap*", "erspan*", "sit*", "ipip*",
+	"tun2proxy*", "utun*", "tun*", "tap*", "ppp*", "ip6tnl*", "ip6gre*",
+	"teql*", "gre*", "gretap*", "erspan*", "sit*", "ipip*",
 	// Container / VM bridges
 	"docker*", "veth*", "virbr*", "vmnet*", "vboxnet*", "vnic*", "br-*", "br0",
-	"vmbr*", "vbox*", "vnic*", "veth*", "cni*", "flannel*", "cali*", "weave*",
-	"lxc*", "lxd*", "podman*", "nerdctl*",
+	"vmbr*", "vbox*", "cni*", "lxc*", "lxd*", "podman*", "nerdctl*",
 	// Cluster / overlay networks
 	"kube-ipvs*", "cilium*", "flannel*", "cali*", "weave*", "kube*",
 	// Carrier / Tailscale / ZeroTier style overlays
-	"tailscale*", "zt*", "wg*", "ham*", "ca*",
+	"tailscale*", "zt*", "wg*", "ifb*", "ham*", "ca*",
 	// Misc virtual
-	"rmnet*", "wwan*", "dummy*", "ifb*", "lo", "lo*",
+	"rmnet*", "wwan*", "dummy*", "lo", "lo*",
 	// Meta / clash style TUN devices
 	"Meta", "meta", "mihomo", "Mihomo", "clash", "Clash", "sing-box*", "SingTun*",
 }
@@ -126,12 +125,6 @@ func isDefaultExcluded(brand config.Brand, name string) bool {
 	// 不应因为某个条目碰巧是数字（如 "0"）而匹配到索引 0 的网卡。
 	if _, ok := matchesPattern(DefaultExcludedNames, name, -1); ok {
 		return true
-	}
-	lowered := strings.ToLower(name)
-	for _, entry := range DefaultExcludedNames {
-		if !strings.HasSuffix(entry, "*") && strings.EqualFold(entry, lowered) {
-			return true
-		}
 	}
 	return false
 }
@@ -359,21 +352,16 @@ func atoiOrZero(s string) int {
 }
 
 // selectAddress picks the best source address on a view for the family.
-// Global addresses beat link-local ones.
+// Link-local addresses are rejected (withZone=false): binding fe80:: produces
+// a socket that cannot reach anything off-link, so Select must fail cleanly
+// and let the caller fall back instead.
 func selectAddress(view interfaceView, family int) (netip.Addr, bool) {
-	var fallback netip.Addr
 	for _, addr := range view.Addresses {
-		if !usableAddress(addr, family, true) {
-			continue
-		}
-		if !addr.IsLinkLocalUnicast() {
+		if usableAddress(addr, family, false) {
 			return addr, true
 		}
-		if !fallback.IsValid() {
-			fallback = addr
-		}
 	}
-	return fallback, fallback.IsValid()
+	return netip.Addr{}, false
 }
 
 // collect turns interface snapshots plus default routes into scored

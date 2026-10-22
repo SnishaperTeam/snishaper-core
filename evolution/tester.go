@@ -178,6 +178,11 @@ func (t *Tester) runTest(task *TestTask) {
 
 			result := t.testDomain(d, task.Config)
 
+			// 任务已停止：丢弃结果，不再向 StatusFailed 的任务追加进度。
+			if t.stopped() {
+				return
+			}
+
 			t.mu.Lock()
 			task.Results = append(task.Results, result)
 			t.allResults = append(t.allResults, result)
@@ -205,6 +210,16 @@ func (t *Tester) runTest(task *TestTask) {
 		countByStatus(task.Results, false))
 }
 
+// stopped 报告当前任务是否已被 StopTest 停止。
+func (t *Tester) stopped() bool {
+	select {
+	case <-t.stopChan:
+		return true
+	default:
+		return false
+	}
+}
+
 func (t *Tester) testDomain(domain string, config TestConfig) DomainTestResult {
 	t.log("[DOMAIN] ========== 开始测试域名: %s ==========", domain)
 
@@ -222,6 +237,13 @@ func (t *Tester) testDomain(domain string, config TestConfig) DomainTestResult {
 		result.Method = MethodDirect
 		result.Delay = step0Result.Delay
 		t.log("[DOMAIN] 域名 %s 测试完成: 可达=true, 方法=direct", domain)
+		return result
+	}
+
+	// 停止检查放在探测步骤之间：StopTest 后每个域名最多再花一个探测步骤
+	// 的时间，而不是把全部 tcping/NAT64/ECH 探测跑完。
+	if t.stopped() {
+		result.Error = "测试已停止"
 		return result
 	}
 
@@ -260,6 +282,11 @@ func (t *Tester) testDomain(domain string, config TestConfig) DomainTestResult {
 
 	isCF := t.autoRouter.IsCloudflare(domain)
 	result.IsCloudflare = isCF
+
+	if t.stopped() {
+		result.Error = "测试已停止"
+		return result
+	}
 
 	if isCF {
 		t.log("[DOMAIN] 检测到域名 %s 为 Cloudflare 域名，开启 Cloudflare 专用测试流程 (ECH -> QUIC -> TLS分片)", domain)

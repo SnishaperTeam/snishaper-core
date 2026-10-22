@@ -2,7 +2,9 @@ package subscription
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -216,6 +218,17 @@ func (s *Store) Reload() error {
 	return nil
 }
 
+// writeFileAtomic writes data to path through a temp file and a rename, so a
+// crash mid-write can never truncate the previous file: readers see either the
+// old content or the new content, never a partial write.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func (s *Store) saveLocked() error {
 	sf := storeFile{ActiveID: s.activeID}
 	for _, e := range s.entries {
@@ -232,7 +245,7 @@ func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0o644)
+	return writeFileAtomic(s.path, data, 0o644)
 }
 
 func (s *Store) find(id string) *Entry {
@@ -680,22 +693,11 @@ func pruneSelection(selection map[string]string, groups []Group) map[string]stri
 	return out
 }
 
+// newID derives a subscription id from its content (name+url), so adding the
+// same subscription twice reuses the id and Add's overwrite branch can fire.
 func newID(name, url string) string {
-	seed := name
-	if seed == "" {
-		seed = url
-	}
-	sum := fnv1a(seed)
-	return fmt.Sprintf("sub-%d-%x", time.Now().UnixNano(), sum&0xffffff)
-}
-
-func fnv1a(s string) uint32 {
-	var h uint32 = 2166136261
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= 16777619
-	}
-	return h
+	sum := sha256.Sum256([]byte(name + "\x00" + url))
+	return "sub-" + hex.EncodeToString(sum[:16])
 }
 
 func deriveNameFromURL(url string) string {
@@ -824,9 +826,14 @@ func fetchWith(client *http.Client, rawURL string, brand config.Brand) ([]byte, 
 		return nil, UserInfo{}, fmt.Errorf("http status %d", resp.StatusCode)
 	}
 
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, MaxPayloadBytes))
+	// Read one byte past the cap so an oversized payload is detected instead
+	// of being silently truncated at MaxPayloadBytes.
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, MaxPayloadBytes+1))
 	if err != nil {
 		return nil, UserInfo{}, err
+	}
+	if len(payload) > MaxPayloadBytes {
+		return nil, UserInfo{}, fmt.Errorf("subscription payload exceeds the %d byte limit", MaxPayloadBytes)
 	}
 	if len(payload) == 0 {
 		return nil, UserInfo{}, errors.New("subscription response was empty")

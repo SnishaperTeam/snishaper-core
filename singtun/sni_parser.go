@@ -15,7 +15,6 @@ type SNIInfo struct {
 	IsTLS  bool   // 首字节是否 TLS handshake record
 	SNI    string // 外层 server_name（可空；ECH 场景即外层 SNI，D4 降级用）
 	HasECH bool   // 是否存在 ECH（encrypted_client_hello）扩展
-	Record []byte // 已消费的全部 TLS record 字节（重写注入与回放用）
 	Err    error  // 畸形/读取失败原因（任何输入不 panic）
 }
 
@@ -75,7 +74,6 @@ func SniffClientHello(conn net.Conn, timeout time.Duration) (SNIInfo, net.Conn) 
 	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 
 	info, consumed := readClientHelloStream(conn)
-	info.Record = consumed
 	return info, &prefixConn{Conn: conn, prefix: consumed}
 }
 

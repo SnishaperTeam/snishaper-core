@@ -489,6 +489,10 @@ func (p *ProxyServer) dialUpstream(cr *connectResult) error {
 }
 
 func (p *ProxyServer) dialWithRule(ctx context.Context, network, addr string, rule Rule) (net.Conn, error) {
+	// "block" 规则：在任何拨号发生前直接拒绝，绝不为被封目标建连。
+	if strings.EqualFold(strings.TrimSpace(rule.Mode), "block") {
+		return nil, fmt.Errorf("connection blocked by rule: %s", addr)
+	}
 	if p.isSelfTarget(addr) {
 		return nil, fmt.Errorf("refusing to dial proxy's own listen address %s", addr)
 	}

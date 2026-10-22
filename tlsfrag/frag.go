@@ -239,38 +239,6 @@ func SendRecords(conn net.Conn, clientHello []byte, offset, length, records, seg
 	splitAndAppend(clientHello[5:cut], header, leftChunks, &chunks)
 	splitAndAppend(clientHello[cut:], header, rightChunks, &chunks)
 
-	if segments == -1 {
-		for i, chunk := range chunks {
-			if i == 0 {
-				if oob {
-					if err := SendWithOOB(conn, chunk, 0x0); err != nil {
-						return fmt.Errorf("oob: %w", err)
-					}
-					if interval > 0 {
-						time.Sleep(interval)
-					}
-				} else if oobex {
-					l := len(chunk)
-					if err := SendWithOOB(conn, chunk[:l-1], chunk[l-1]); err != nil {
-						return fmt.Errorf("oob 1: %w", err)
-					}
-				}
-			} else if i == 1 && oobex {
-				if err := SendWithOOB(conn, chunk, 0x0); err != nil {
-					return fmt.Errorf("oob 2: %w", err)
-				}
-			} else {
-				if _, err := conn.Write(chunk); err != nil {
-					return fmt.Errorf("write record %d: %w", i+1, err)
-				}
-				if interval > 0 {
-					time.Sleep(interval)
-				}
-			}
-		}
-		return nil
-	}
-
 	merged := make([]byte, 0, records*5+len(clientHello))
 	for _, c := range chunks {
 		merged = append(merged, c...)

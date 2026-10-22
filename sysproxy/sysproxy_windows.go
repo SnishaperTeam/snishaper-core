@@ -3,6 +3,7 @@
 package sysproxy
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -33,6 +34,10 @@ type SystemProxyStatus struct {
 	Server string
 	// Override 是代理绕过列表；本包启用代理时固定写入 "<local>"。
 	Override string
+	// AutoConfigURL 是 WinInet 的 PAC 地址（AutoConfigURL 注册表值）。
+	// PAC 存在时 WinInet 优先走 PAC 而忽略 ProxyServer，因此启用代理前
+	// 必须先清掉它，恢复时原样写回。
+	AutoConfigURL string
 }
 
 // Manager 是系统代理管理器。
@@ -97,6 +102,11 @@ func (m *Manager) Status() SystemProxyStatus {
 		if err == nil {
 			status.Override = strings.TrimSpace(override)
 		}
+
+		pac, _, err := k.GetStringValue("AutoConfigURL")
+		if err == nil {
+			status.AutoConfigURL = strings.TrimSpace(pac)
+		}
 	}
 
 	m.mu.Lock()
@@ -136,6 +146,11 @@ func (m *Manager) Set(enable bool, server string) error {
 		override := "<local>"
 		if err := k.SetStringValue("ProxyOverride", override); err != nil {
 			return fmt.Errorf("[sysproxy] failed to set ProxyOverride: %w", err)
+		}
+		// WinInet 优先使用 PAC：不清掉 AutoConfigURL 时流量会继续按 PAC
+		// 分流，完全绕过刚写好的 ProxyServer。
+		if err := k.DeleteValue("AutoConfigURL"); err != nil && !errors.Is(err, registry.ErrNotExist) {
+			return fmt.Errorf("[sysproxy] failed to clear AutoConfigURL: %w", err)
 		}
 	}
 
@@ -197,6 +212,9 @@ func (m *Manager) RestoreOriginal() error {
 		if original.Override != "" {
 			_ = k.SetStringValue("ProxyOverride", original.Override)
 		}
+	}
+	if original.AutoConfigURL != "" {
+		_ = k.SetStringValue("AutoConfigURL", original.AutoConfigURL)
 	}
 
 	m.invalidateCache()

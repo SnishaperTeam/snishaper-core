@@ -92,7 +92,11 @@ type FailoverResolver struct {
 	// brand 决定 DoH 请求携带的产品 User-Agent。
 	brand    config.Brand
 	dnsCache sync.Map // domain -> *dnsCacheEntry
-	echCache sync.Map // domain -> []byte (ECH config hot-patched by server retry)
+
+	// refreshInflight 实现同域名后台刷新 singleflight：
+	// 过期-but-fresh 缓存的并发请求只触发一次后台 DoH 解析。
+	refreshMu       sync.Mutex
+	refreshInflight map[string]struct{}
 
 	clientMu    sync.Mutex             // 保护 clients
 	clients     map[string]*nodeClient // node 配置指纹 -> 复用中的 DoH 客户端
@@ -152,10 +156,11 @@ func (r *FailoverResolver) logf(format string, args ...any) {
 // adapter and the DNS nodes returned by getNodes.
 func NewFailoverResolver(proxy ProxyServer, getNodes func() []DNSNode, opts ...Option) *FailoverResolver {
 	r := &FailoverResolver{
-		proxy:    proxy,
-		getNodes: getNodes,
-		clients:  make(map[string]*nodeClient),
-		logger:   corelog.Nop,
+		proxy:           proxy,
+		getNodes:        getNodes,
+		clients:         make(map[string]*nodeClient),
+		refreshInflight: make(map[string]struct{}),
+		logger:          corelog.Nop,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -274,6 +279,10 @@ func (r *FailoverResolver) getNodeClient(ctx context.Context, node DNSNode) (*ht
 		return nil, fmt.Errorf("invalid node URL: %w", err)
 	}
 	host := parsedURL.Hostname()
+	port := parsedURL.Port()
+	if port == "" {
+		port = "443"
+	}
 
 	rule := Rule{
 		SniFake:       node.SNI,
@@ -328,15 +337,11 @@ func (r *FailoverResolver) getNodeClient(ctx context.Context, node DNSNode) (*ht
 
 		var dialAddrs []string
 		if len(node.IPs) > 0 {
-			port := parsedURL.Port()
-			if port == "" {
-				port = "443"
-			}
 			for _, ip := range node.IPs {
 				dialAddrs = append(dialAddrs, net.JoinHostPort(ip, port))
 			}
 		} else {
-			dialAddrs = []string{net.JoinHostPort(host, "443")}
+			dialAddrs = []string{net.JoinHostPort(host, port)}
 		}
 
 		tr := &http3.Transport{
@@ -401,15 +406,11 @@ func (r *FailoverResolver) getNodeClient(ctx context.Context, node DNSNode) (*ht
 			// 收集拨号候选 IP
 			var dialCandidates []string
 			if len(node.IPs) > 0 {
-				port := parsedURL.Port()
-				if port == "" {
-					port = "443"
-				}
 				for _, ip := range node.IPs {
 					dialCandidates = append(dialCandidates, net.JoinHostPort(ip, port))
 				}
 			} else {
-				dialCandidates = []string{net.JoinHostPort(host, "443")}
+				dialCandidates = []string{net.JoinHostPort(host, port)}
 			}
 
 			var dialConn net.Conn
@@ -494,8 +495,9 @@ func (r *FailoverResolver) exchangeNodeWithRetry(ctx context.Context, node *DNSN
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// 阻断自愈：ECH 被拒时优先使用服务端 RetryConfigList，其次安全 DNS 刷新后重试
-		if allowRetry && node.ECHEnabled && node.ECHAutoUpdate {
+		// 阻断自愈：ECH 被拒时优先使用服务端 RetryConfigList，其次安全 DNS 刷新后重试。
+		// 无 profile ID 时刷新无处落地，重试只会复用同样的旧 ECH，因此跳过自愈。
+		if allowRetry && node.ECHEnabled && node.ECHAutoUpdate && node.ECHProfileID != "" {
 			parsedURL, _ := url.Parse(node.URL)
 			if parsedURL != nil {
 				host := parsedURL.Hostname()
@@ -511,10 +513,7 @@ func (r *FailoverResolver) exchangeNodeWithRetry(ctx context.Context, node *DNSN
 					r.logf("[DOH] Handshake failed for %s (%v), attempting ECH DNS refresh...", host, err)
 					if newECH, refreshErr := r.ResolveECHSafe(ctx, host); refreshErr == nil && len(newECH) > 0 {
 						r.logf("[DOH] Successfully refreshed ECH for %s (%d bytes). Syncing and retrying...", host, len(newECH))
-						if node.ECHProfileID != "" {
-							r.proxy.UpdateECHProfileConfig(node.ECHProfileID, newECH)
-						}
-						r.echCache.Store(host, append([]byte(nil), newECH...))
+						r.proxy.UpdateECHProfileConfig(node.ECHProfileID, newECH)
 						return r.exchangeNodeWithRetry(ctx, node, msg, false)
 					}
 				}
@@ -637,11 +636,24 @@ func (r *FailoverResolver) ResolveIPs(ctx context.Context, domain string) ([]str
 			return entry.ips, nil
 		}
 		if now.Before(entry.staleAt) {
-			go func(dom string) {
-				bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				_, _ = r.resolveAndCache(bgCtx, dom)
-			}(domain)
+			// 同一域名同时只允许一个后台刷新，避免过期风暴放大成并发 DoH 解析
+			r.refreshMu.Lock()
+			if _, busy := r.refreshInflight[domain]; !busy {
+				r.refreshInflight[domain] = struct{}{}
+				r.refreshMu.Unlock()
+				go func(dom string) {
+					defer func() {
+						r.refreshMu.Lock()
+						delete(r.refreshInflight, dom)
+						r.refreshMu.Unlock()
+					}()
+					bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_, _ = r.resolveAndCache(bgCtx, dom)
+				}(domain)
+			} else {
+				r.refreshMu.Unlock()
+			}
 			return entry.ips, nil
 		}
 	}
@@ -795,10 +807,7 @@ func (r *FailoverResolver) recoverNodeECH(ctx context.Context, node *DNSNode, ho
 	if len(rawCfg) == 0 {
 		return false
 	}
-	if node.ECHProfileID != "" {
-		r.proxy.UpdateECHProfileConfig(node.ECHProfileID, rawCfg)
-	}
-	r.echCache.Store(host, append([]byte(nil), rawCfg...))
+	r.proxy.UpdateECHProfileConfig(node.ECHProfileID, rawCfg)
 	r.logf("[DOH] Applied server retry ECH config for %s (%d bytes)", host, len(rawCfg))
 	return true
 }

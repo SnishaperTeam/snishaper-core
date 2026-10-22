@@ -128,12 +128,7 @@ func (cm *CertManager) generateCAUnlocked() error {
 	cm.caCert = cert
 	cm.caKey = privateKey
 
-	if err := cm.saveCA(); err != nil {
-		return err
-	}
-
-	fmt.Println("[Cert] CA certificate generated successfully")
-	return nil
+	return cm.saveCA()
 }
 
 // GenerateCA creates a new CA certificate and key and saves them to disk.
@@ -143,29 +138,23 @@ func (cm *CertManager) GenerateCA() error {
 	return cm.generateCAUnlocked()
 }
 
+// writeFileAtomic writes data through a temp file + rename so a crash or power
+// loss mid-write never leaves a truncated file behind.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func (cm *CertManager) saveCA() error {
-	caFile, err := os.Create(cm.caPath)
-	if err != nil {
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cm.caCert.Raw})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(cm.caKey)})
+	if err := writeFileAtomic(cm.caPath, caPEM, 0644); err != nil {
 		return err
 	}
-	defer caFile.Close()
-
-	if err := pem.Encode(caFile, &pem.Block{Type: "CERTIFICATE", Bytes: cm.caCert.Raw}); err != nil {
-		return err
-	}
-
-	keyFile, err := os.OpenFile(cm.keyPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
-	defer keyFile.Close()
-
-	keyBytes := x509.MarshalPKCS1PrivateKey(cm.caKey)
-	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: keyBytes}); err != nil {
-		return err
-	}
-
-	return nil
+	return writeFileAtomic(cm.keyPath, keyPEM, 0600)
 }
 
 // LoadCA loads the existing CA certificate and key from disk, generating a new CA if missing.
@@ -318,8 +307,6 @@ func (cm *CertManager) InstallCA() error {
 	}
 
 	cm.invalidateInstallStatusCache()
-
-	fmt.Println("[Cert] CA certificate installed successfully")
 	return nil
 }
 
@@ -394,7 +381,6 @@ func (cm *CertManager) RegenerateCA() error {
 	certs, err := cm.GetInstalledCertificates()
 	if err == nil {
 		for _, c := range certs {
-			fmt.Printf("[Cert] Cleaning up old cert: %s\n", c.Thumbprint)
 			_ = cm.UninstallCertificate(c.Token)
 		}
 	}
@@ -406,8 +392,6 @@ func (cm *CertManager) RegenerateCA() error {
 		return err
 	}
 	cm.certMu.Unlock()
-
-	fmt.Println("[Cert] CA certificate regenerated successfully")
 
 	// 3. Install the new one
 	return cm.InstallCA()
@@ -442,8 +426,10 @@ func InitCertManagerFor(brand config.Brand, certDir string) (*CertManager, error
 	)
 
 	if err := cm.LoadCA(); err != nil {
-		_ = os.Remove(cm.caPath)
-		_ = os.Remove(cm.keyPath)
+		// Keep the unreadable files for forensics instead of deleting the old
+		// trust anchor: renaming preserves the auto-recovery without data loss.
+		_ = os.Rename(cm.caPath, cm.caPath+".corrupt.bak")
+		_ = os.Rename(cm.keyPath, cm.keyPath+".corrupt.bak")
 		if genErr := cm.GenerateCA(); genErr != nil {
 			return nil, fmt.Errorf("load existing CA failed: %v; regenerate failed: %w", err, genErr)
 		}

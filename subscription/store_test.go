@@ -51,6 +51,31 @@ func TestStoreAddRejectsBadURL(t *testing.T) {
 	}
 }
 
+// Adding the same name+URL twice must overwrite the existing entry instead of
+// creating a duplicate: newID is a content hash, so Add's find(entry.ID)
+// matches the previous entry.
+func TestStoreAddSameNameAndURLOverwrites(t *testing.T) {
+	body := []byte("proxies:\n  - name: n1\n    type: ss\n    server: a.com\n    port: 8388\n    cipher: aes-128-gcm\n    password: p\n")
+	srv := newTestHTTPServer(t, body, "")
+
+	s, _ := newTestStore(t)
+	first, err := s.Add("prov", srv.URL)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	second, err := s.Add("prov", srv.URL)
+	if err != nil {
+		t.Fatalf("Add again: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("same name+url must reuse the id: %q vs %q", first.ID, second.ID)
+	}
+	entries := s.List()
+	if len(entries) != 2 { // builtin + prov
+		t.Fatalf("duplicate add produced %d entries, want 2", len(entries))
+	}
+}
+
 func TestStoreActivateSwitchesRules(t *testing.T) {
 	s, _ := newTestStore(t)
 	seedEntry(s, "alpha", false, []string{"a.com"})

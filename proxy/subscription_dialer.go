@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -160,9 +159,3 @@ func (p *ProxyServer) secureOverTunnel(tunnel net.Conn, cr *connectResult) (net.
 	return uconn, nil
 }
 
-// subscriptionTargetHost extracts a hostname for dialing, preferring the
-// literal address.
-func subscriptionTargetHost(targetAddr string) (string, int) {
-	host, port := subscription.SplitHostPort(targetAddr, 443)
-	return strings.TrimSpace(host), port
-}
