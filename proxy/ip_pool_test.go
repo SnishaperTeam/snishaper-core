@@ -146,7 +146,7 @@ func TestFetchCDNIPsRejectsUnknownCDN(t *testing.T) {
 	if _, ok := cfpool.CDNFetchEndpoints["cloudflare"]; !ok {
 		t.Fatal("cloudflare endpoint must stay registered")
 	}
-	if _, ok := cfpool.CDNFetchEndpoints["cloudfront"]; !ok {
-		t.Fatal("cloudfront endpoint must be registered")
+	if _, ok := cfpool.CDNFetchEndpoints["cloudfront"]; ok {
+		t.Fatal("cloudfront must not have a built-in fetch source; custom pools are manual-only")
 	}
 }

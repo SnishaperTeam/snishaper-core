@@ -650,8 +650,7 @@ type cfApiResponse struct {
 // A CDN absent from this map has no auto-fetch source and can only be filled
 // with manually curated IPs.
 var CDNFetchEndpoints = map[string]string{
-	"cloudflare":  "get_cloudflare_ip",
-	"cloudfront":  "get_cloudfront_ip",
+	"cloudflare": "get_cloudflare_ip",
 }
 
 // FetchCloudflareIPs retrieves Cloudflare edge IPs from the configured IP source API.
