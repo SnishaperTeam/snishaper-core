@@ -32,6 +32,7 @@ type ConfigRule struct {
 	ECHProfileID   string           `json:"ech_profile_id,omitempty"`
 	ECHDomain      string           `json:"ech_domain,omitempty"`
 	UseCFPool      bool             `json:"use_cf_pool,omitempty"`
+	IPPool         string           `json:"ip_pool,omitempty"`
 	CertVerify     CertVerifyConfig `json:"cert_verify,omitempty"`
 	NAT64Enabled   bool             `json:"nat64_enabled,omitempty"`
 	NAT64ProfileID string           `json:"nat64_profile_id,omitempty"`
@@ -67,6 +68,7 @@ func (rm *RuleManager) ExportConfig() (string, error) {
 			ECHProfileID:  sg.ECHProfileID,
 			ECHDomain:     sg.ECHDomain,
 			UseCFPool:     sg.UseCFPool,
+			IPPool:        sg.IPPool,
 			CertVerify:    sg.CertVerify,
 		}
 
@@ -194,6 +196,7 @@ func (rm *RuleManager) ImportConfigWithSummary(content string) (ImportSummary, e
 				ECHProfileID:   rule.ECHProfileID,
 				ECHDomain:      rule.ECHDomain,
 				UseCFPool:      rule.UseCFPool,
+				IPPool:         strings.TrimSpace(rule.IPPool),
 				CertVerify:     rule.CertVerify,
 				NAT64Enabled:   rule.NAT64Enabled,
 				NAT64ProfileID: rule.NAT64ProfileID,

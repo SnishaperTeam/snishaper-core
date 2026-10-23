@@ -25,6 +25,7 @@ type RuleManager struct {
 	settingsPath                  string
 	rulesPath                     string
 	cloudflareConfig              CloudflareConfig
+	ipPoolConfigs                 []IPPoolConfig
 	tunConfig                     TUNConfig
 	fragConfig                    FragmentConfig
 	closeToTray                   bool
@@ -351,6 +352,7 @@ func (rm *RuleManager) loadSettingsConfig() error {
 
 	// 2. Override with JSON values if they exist
 	rm.cloudflareConfig = config.CloudflareConfig
+	rm.ipPoolConfigs = normalizeIPPoolConfigs(config.IPPools)
 	rm.tunConfig = config.TUN
 	rm.fragConfig = config.Fragment
 
@@ -520,6 +522,7 @@ func (rm *RuleManager) buildRules() {
 				ECHEnabled:         sg.ECHEnabled,
 				ECHProfileID:       sg.ECHProfileID,
 				UseCFPool:          sg.UseCFPool,
+			IPPool:             sg.IPPool,
 				ECHDiscoveryDomain: echProfile.DiscoveryDomain,
 				ECHDoHUpstream:     echProfile.DoHUpstream,
 				ECHAutoUpdate:      echProfile.AutoUpdate,
@@ -569,6 +572,55 @@ func (rm *RuleManager) GetCloudflareConfig() CloudflareConfig {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
 	return rm.cloudflareConfig
+}
+
+// GetIPPoolsConfig 返回全部命名 IP 池配置（cloudfront、自定义 CDN 等）。
+func (rm *RuleManager) GetIPPoolsConfig() []IPPoolConfig {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return append([]IPPoolConfig(nil), rm.ipPoolConfigs...)
+}
+
+// UpdateIPPoolsConfig 覆盖保存全部命名 IP 池配置。
+func (rm *RuleManager) UpdateIPPoolsConfig(pools []IPPoolConfig) error {
+	rm.mu.Lock()
+	rm.ipPoolConfigs = normalizeIPPoolConfigs(pools)
+	rm.mu.Unlock()
+	return rm.saveSettingsConfig()
+}
+
+// normalizeIPPoolConfigs trims pool names, drops entries without a usable
+// name, and enforces lowercase unique names (cloudflare is reserved for the
+// legacy Cloudflare pool).
+func normalizeIPPoolConfigs(pools []IPPoolConfig) []IPPoolConfig {
+	seen := make(map[string]struct{}, len(pools))
+	out := make([]IPPoolConfig, 0, len(pools))
+	for _, pool := range pools {
+		name := strings.ToLower(strings.TrimSpace(pool.Name))
+		if name == "" || name == "cloudflare" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		pool.Name = name
+		pool.PreferredIPs = trimNonEmpty(pool.PreferredIPs)
+		pool.APIKey = strings.TrimSpace(pool.APIKey)
+		seen[name] = struct{}{}
+		out = append(out, pool)
+	}
+	return out
+}
+
+func trimNonEmpty(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // GetTUNConfig 返回 TUN 配置。
@@ -961,6 +1013,7 @@ func (rm *RuleManager) saveSettingsConfig() error {
 	autoUpdateRules := rm.autoUpdateRules
 	migrationEnabled := rm.migrationEnabled
 	cloudflareConfig := rm.cloudflareConfig
+	ipPoolConfigs := rm.ipPoolConfigs
 	tunConfig := normalizeTUNConfig(rm.tunConfig, rm.brand)
 	fragConfig := normalizeFragmentConfig(rm.fragConfig)
 
@@ -975,6 +1028,7 @@ func (rm *RuleManager) saveSettingsConfig() error {
 		AutoEnableSysProxyOnAutoStart: &autoEnableSysProxyOnAutoStart,
 		AutoUpdateRules:               &autoUpdateRules,
 		CloudflareConfig:              cloudflareConfig,
+		IPPools:                       ipPoolConfigs,
 		AutoRouting:                   rm.autoRoutingConfig,
 		TUN:                           tunConfig,
 		Fragment:                      fragConfig,

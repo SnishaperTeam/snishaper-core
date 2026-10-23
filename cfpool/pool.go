@@ -646,12 +646,31 @@ type cfApiResponse struct {
 	Info   map[string][]apiIPInfo `json:"info"`
 }
 
+// CDNFetchEndpoints maps a supported CDN name to its wetest.vip fetch endpoint.
+// A CDN absent from this map has no auto-fetch source and can only be filled
+// with manually curated IPs.
+var CDNFetchEndpoints = map[string]string{
+	"cloudflare":  "get_cloudflare_ip",
+	"cloudfront":  "get_cloudfront_ip",
+}
+
 // FetchCloudflareIPs retrieves Cloudflare edge IPs from the configured IP source API.
 func FetchCloudflareIPs(apiKey string) ([]string, error) {
+	return FetchCDNIPs("cloudflare", apiKey)
+}
+
+// FetchCDNIPs retrieves preferred edge IPs for the named CDN. It returns an
+// error for CDNs without a fetch endpoint — callers should treat that as
+// "manual-only pool" rather than a fatal condition.
+func FetchCDNIPs(cdn string, apiKey string) ([]string, error) {
+	endpoint, ok := CDNFetchEndpoints[strings.ToLower(strings.TrimSpace(cdn))]
+	if !ok {
+		return nil, fmt.Errorf("no IP fetch source for CDN %q", cdn)
+	}
 	if apiKey == "" {
 		apiKey = "o1zrmHAF"
 	}
-	url := fmt.Sprintf("https://www.wetest.vip/api/cf2dns/get_cloudflare_ip?key=%s&type=v4", apiKey)
+	url := fmt.Sprintf("https://www.wetest.vip/api/cf2dns/%s?key=%s&type=v4", endpoint, apiKey)
 
 	client := &http.Client{
 		Timeout: 10 * time.Second,

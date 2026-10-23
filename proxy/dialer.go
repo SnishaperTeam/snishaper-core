@@ -212,11 +212,11 @@ func (p *ProxyServer) buildDialCandidates(ctx context.Context, targetHost, targe
 			return upstreamCandidates
 		}
 
-		if rule.UseCFPool && p.CFPoolUsable() {
-			// 规则显式指定了 upstream 时它优先；upstream 为空/DIRECT 时 CF 池就是唯一
+		if pool := p.poolForRule(rule); ipPoolUsable(pool) {
+			// 规则显式指定了 upstream 时它优先；upstream 为空/DIRECT 时 IP 池就是唯一
 			// 指定来源。取池中全部候选而非前若干个 —— 串行拨号需要足够的候选才能在个别
 			// IP 不可达时继续往下试。
-			poolIPs := p.cfPool.GetAllIPs()
+			poolIPs := pool.GetAllIPs()
 			if len(poolIPs) > 0 {
 				prefs := make([]string, 0, len(poolIPs))
 				for _, ip := range poolIPs {
@@ -299,16 +299,16 @@ func (p *ProxyServer) resolveDialCandidates(cr *connectResult) error {
 		prefix = p.rules.GetNAT64PrefixByID(cr.rule.NAT64ProfileID)
 	}
 
-	if cr.rule.UseCFPool {
-		if p.CFPoolUsable() {
-			if addrs := p.cfPool.CandidateAddrs(port, prefix); len(addrs) > 0 {
+	if pool := p.poolForRule(cr.rule); pool != nil {
+		if ipPoolUsable(pool) {
+			if addrs := pool.CandidateAddrs(port, prefix); len(addrs) > 0 {
 				cr.dialCandidates = addrs
 				cr.dialAddr = addrs[0]
-				p.tracef("[Connect] CFPool candidates %v for host %s", addrs, cr.targetHost)
+				p.tracef("[Connect] IP pool %q candidates %v for host %s", cr.rule.IPPool, addrs, cr.targetHost)
 				return nil
 			}
-			p.tracef("[Connect] CFPool has no usable candidate, falling back to buildDialCandidates")
-		} else {
+			p.tracef("[Connect] IP pool has no usable candidate, falling back to buildDialCandidates")
+		} else if cr.rule.IPPool == "" {
 			// Pool is nil, empty, or stale — fall back to DNS, trigger async refresh if stale
 			p.maybeRefreshCFPoolAsync()
 		}
@@ -368,9 +368,9 @@ func (p *ProxyServer) dialSerial(rule Rule, candidates []string) (net.Conn, stri
 		if err == nil {
 			return conn, addr, nil
 		}
-		if rule.UseCFPool && p.cfPool != nil {
+		if pool := p.poolForRule(rule); pool != nil {
 			if h, _, splitErr := net.SplitHostPort(addr); splitErr == nil && h != "" {
-				p.cfPool.ReportFailure(h)
+				pool.ReportFailure(h)
 			}
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", addr, err))
@@ -431,9 +431,9 @@ func (p *ProxyServer) buildDoHFallbackCandidates(cr *connectResult, tried []stri
 // （换 CDN、IP 被封），而目标域名本身仍可经 DoH 解析出可达地址。回退仍失败
 // 时把最终（通常是拨号超时）错误原样返回，由调用方决定对客户端的响应。
 func (p *ProxyServer) dialUpstream(cr *connectResult) error {
-	// CF 池路径保留 DialParallel 的整池竞速：这条路径的调用方不做二次竞速，
+	// IP 池路径保留 DialParallel 的整池竞速：这条路径的调用方不做二次竞速，
 	// 换成串行拨号会明显拉长建连时间。
-	if cr.rule.UseCFPool && p.CFPoolUsable() {
+	if pool := p.poolForRule(cr.rule); ipPoolUsable(pool) {
 		_, port, _ := net.SplitHostPort(cr.targetAddr)
 		if port == "" {
 			port = "443"
@@ -442,15 +442,15 @@ func (p *ProxyServer) dialUpstream(cr *connectResult) error {
 		if cr.rule.NAT64Enabled && cr.rule.NAT64ProfileID != "" {
 			prefix = p.rules.GetNAT64PrefixByID(cr.rule.NAT64ProfileID)
 		}
-		conn, dialedAddr, err := p.cfPool.DialParallel(context.Background(), "tcp", port, prefix)
+		conn, dialedAddr, err := pool.DialParallel(context.Background(), "tcp", port, prefix)
 		if err == nil {
 			cr.dialCandidates = []string{dialedAddr}
 			cr.dialAddr = dialedAddr
 			cr.conn = conn
-			p.tracef("[Connect] CFPool DialParallel success: %s", dialedAddr)
+			p.tracef("[Connect] IP pool DialParallel success: %s", dialedAddr)
 			return nil
 		}
-		p.tracef("[Connect] CFPool DialParallel failed: %v, falling back to buildDialCandidates", err)
+		p.tracef("[Connect] IP pool DialParallel failed: %v, falling back to buildDialCandidates", err)
 	}
 
 	// A subscription node, when bound, carries the traffic itself. It is
@@ -480,9 +480,9 @@ func (p *ProxyServer) dialUpstream(cr *connectResult) error {
 
 	cr.dialAddr = dialedAddr
 	cr.conn = conn
-	if cr.rule.UseCFPool && p.cfPool != nil {
+	if pool := p.poolForRule(cr.rule); pool != nil {
 		if h, _, splitErr := net.SplitHostPort(dialedAddr); splitErr == nil && h != "" {
-			p.cfPool.ReportSuccess(h)
+			pool.ReportSuccess(h)
 		}
 	}
 	return nil

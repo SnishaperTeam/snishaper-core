@@ -301,19 +301,20 @@ func (p *ProxyServer) handleTransparent(clientConn, upstreamConn net.Conn, host 
 		}
 
 		var errs []error
+		pool := p.poolForRule(rule)
 		for _, cand := range dialCandidates {
 			upstreamConn, err = p.dialWithRule(context.Background(), "tcp", cand, rule)
 			if err == nil {
-				if rule.UseCFPool && p.cfPool != nil {
+				if pool != nil {
 					if h, _, splitErr := net.SplitHostPort(cand); splitErr == nil && h != "" {
-						p.cfPool.ReportSuccess(h)
+						pool.ReportSuccess(h)
 					}
 				}
 				break
 			}
-			if rule.UseCFPool && p.cfPool != nil {
+			if pool != nil {
 				if h, _, splitErr := net.SplitHostPort(cand); splitErr == nil && h != "" {
-					p.cfPool.ReportFailure(h)
+					pool.ReportFailure(h)
 				}
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", cand, err))

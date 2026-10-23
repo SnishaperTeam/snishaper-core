@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,6 +83,15 @@ type CloudflareConfig struct {
 	AutoUpdate   bool      `json:"auto_update"`
 	APIKey       string    `json:"api_key"`
 	DNSNodes     []DNSNode `json:"dns_nodes,omitempty"`
+}
+
+// IPPoolConfig holds the settings of a named IP pool (cloudfront or a
+// user-defined CDN pool). Pools without a fetch endpoint are manual-only.
+type IPPoolConfig struct {
+	Name         string   `json:"name"`
+	PreferredIPs []string `json:"preferred_ips"`
+	AutoUpdate   bool     `json:"auto_update"`
+	APIKey       string   `json:"api_key,omitempty"`
 }
 
 // TUNConfig holds the TUN mode settings.
@@ -234,6 +244,7 @@ type SettingsConfig struct {
 	Theme                         string            `json:"theme,omitempty"`
 	AppearanceMode                string            `json:"appearance_mode,omitempty"`
 	CloudflareConfig              CloudflareConfig  `json:"cloudflare_config,omitempty"`
+	IPPools                       []IPPoolConfig    `json:"ip_pools,omitempty"`
 	MigrationEnabled              *bool             `json:"migration_enabled,omitempty"`
 	MigrationServer               string            `json:"migration_server,omitempty"`
 	UpdateChannel                 string            `json:"update_channel,omitempty"`
@@ -270,6 +281,7 @@ type Rule struct {
 	AutoRouted         bool             `json:"auto_routed,omitempty"`
 	NAT64Enabled       bool             `json:"nat64_enabled"`
 	NAT64ProfileID     string           `json:"nat64_profile_id,omitempty"`
+	IPPool             string           `json:"ip_pool,omitempty"` // named pool: cloudfront or user-defined; takes precedence over UseCFPool
 	// Frag 是这条规则自己的分片参数（仅 tls-rf 模式使用），nil 表示跟随全局。
 	Frag *FragmentConfig `json:"frag,omitempty"`
 }
@@ -297,6 +309,7 @@ type SiteGroup struct {
 	ECHDomain          string           `json:"ech_domain,omitempty"`
 	NAT64Enabled       bool             `json:"nat64_enabled"`
 	NAT64ProfileID     string           `json:"nat64_profile_id,omitempty"`
+	IPPool             string           `json:"ip_pool,omitempty"`
 	// Frag 是这个站点组自己的分片参数（仅 tls-rf 模式使用），nil 表示跟随全局。
 	Frag *FragmentConfig `json:"frag,omitempty"`
 }
@@ -328,6 +341,9 @@ type ProxyServer struct {
 	certGenerator     CertGenerator
 	dohResolver       *dohresolver.FailoverResolver
 	cfPool            *cfpool.CloudflarePool
+	// ipPools holds named non-Cloudflare pools (cloudfront, user-defined CDNs),
+	// keyed by pool name; rules reference them via Rule.IPPool.
+	ipPools           map[string]*cfpool.CloudflarePool
 	transport         *http.Transport
 	// candidateTransport 是 transport 的懒加载克隆，DialContext 按"请求上下文
 	// 携带的候选+规则"拨号；所有明文 HTTP 请求共享它以复用连接池（受 p.mu 保护）。
@@ -667,6 +683,133 @@ func (p *ProxyServer) GetAllCFIPsWithStats() []*cfpool.IPStats {
 	return nil
 }
 
+// UpdateIPPool applies a set of IPs to the named pool (cloudfront or a
+// user-defined CDN pool), creating it on first use. An empty list leaves an
+// existing pool untouched.
+func (p *ProxyServer) UpdateIPPool(name string, ips []string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "cloudflare" || len(ips) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ipPools == nil {
+		p.ipPools = make(map[string]*cfpool.CloudflarePool)
+	}
+	pool, ok := p.ipPools[name]
+	if !ok || pool == nil {
+		pool = cfpool.NewCloudflarePool(ips)
+		p.ipPools[name] = pool
+		if p.running {
+			pool.Start()
+		}
+		return
+	}
+	pool.UpdateIPs(ips)
+}
+
+// GetIPPool returns the named pool, or nil when it does not exist.
+func (p *ProxyServer) GetIPPool(name string) *cfpool.CloudflarePool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.ipPools[strings.ToLower(strings.TrimSpace(name))]
+}
+
+// IPPoolNames returns the names of all named pools.
+func (p *ProxyServer) IPPoolNames() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	names := make([]string, 0, len(p.ipPools))
+	for name := range p.ipPools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// RemoveIPPool stops and drops the named pool. Rules still referencing it
+// fall back to normal DNS dialing.
+func (p *ProxyServer) RemoveIPPool(name string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool, ok := p.ipPools[name]
+	if !ok {
+		return
+	}
+	delete(p.ipPools, name)
+	if pool != nil {
+		pool.Stop()
+	}
+}
+
+// IPPoolUsable returns true when the named pool exists, has IPs, and is not
+// stale (>1 day).
+func (p *ProxyServer) IPPoolUsable(name string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return ipPoolUsable(p.ipPools[strings.ToLower(strings.TrimSpace(name))])
+}
+
+// GetIPPoolStats returns every IP of the named pool with its statistics.
+func (p *ProxyServer) GetIPPoolStats(name string) []*cfpool.IPStats {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if pool := p.ipPools[strings.ToLower(strings.TrimSpace(name))]; pool != nil {
+		return pool.GetAllIPsWithStats()
+	}
+	return nil
+}
+
+// SetIPPoolFetchTime records when the named pool's IP list was last fetched.
+func (p *ProxyServer) SetIPPoolFetchTime(name string, t time.Time) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if pool := p.ipPools[strings.ToLower(strings.TrimSpace(name))]; pool != nil {
+		pool.SetLastFetchTime(t)
+	}
+}
+
+// TriggerIPPoolHealthCheck starts an immediate health-check pass on the named pool.
+func (p *ProxyServer) TriggerIPPoolHealthCheck(name string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if pool := p.ipPools[strings.ToLower(strings.TrimSpace(name))]; pool != nil {
+		pool.TriggerHealthCheck()
+	}
+}
+
+// RemoveInvalidIPPoolIPs drops failed IPs from the named pool and returns the
+// removal count.
+func (p *ProxyServer) RemoveInvalidIPPoolIPs(name string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if pool := p.ipPools[strings.ToLower(strings.TrimSpace(name))]; pool != nil {
+		return pool.RemoveInvalidIPs()
+	}
+	return 0
+}
+
+// ipPoolUsable reports whether a pool can serve dials right now.
+func ipPoolUsable(pool *cfpool.CloudflarePool) bool {
+	return pool != nil && pool.HasIPs() && !pool.IsStale(24*time.Hour)
+}
+
+// poolForRule resolves the pool a rule dials through: an explicit IPPool name
+// wins, then the legacy UseCFPool flag, then none (DNS path).
+func (p *ProxyServer) poolForRule(rule Rule) *cfpool.CloudflarePool {
+	name := strings.ToLower(strings.TrimSpace(rule.IPPool))
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if name != "" {
+		return p.ipPools[name]
+	}
+	if rule.UseCFPool {
+		return p.cfPool
+	}
+	return nil
+}
+
 // GetListenAddr returns the current local listen address.
 func (p *ProxyServer) GetListenAddr() string {
 	p.mu.RLock()
@@ -730,6 +873,11 @@ func (p *ProxyServer) Start() error {
 	if p.cfPool != nil {
 		p.cfPool.Start()
 	}
+	for _, pool := range p.ipPools {
+		if pool != nil {
+			pool.Start()
+		}
+	}
 
 	listenAddr := p.listenAddr
 	p.mu.Unlock()
@@ -738,6 +886,11 @@ func (p *ProxyServer) Start() error {
 	if err != nil {
 		if p.cfPool != nil {
 			p.cfPool.Stop()
+		}
+		for _, pool := range p.ipPools {
+			if pool != nil {
+				pool.Stop()
+			}
 		}
 		return fmt.Errorf("failed to listen on %s: %w", listenAddr, err)
 	}
@@ -896,6 +1049,11 @@ func (p *ProxyServer) Stop() error {
 
 	if p.cfPool != nil {
 		p.cfPool.Stop()
+	}
+	for _, pool := range p.ipPools {
+		if pool != nil {
+			pool.Stop()
+		}
 	}
 
 	subscription.ReleaseWireguardDialers()
