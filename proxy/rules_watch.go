@@ -18,7 +18,8 @@ func (rm *RuleManager) RulesPath() string {
 	return rm.rulesPath
 }
 
-// WatchRulesFile calls onChange when the rules file changes, returning a stop function.
+// WatchRulesFile calls onChange when either rules layer file (upstream
+// config.json or user config.user.json) changes, returning a stop function.
 func (rm *RuleManager) WatchRulesFile(onChange func()) (func(), error) {
 	path := rm.rulesPath
 	if path == "" {
@@ -26,7 +27,8 @@ func (rm *RuleManager) WatchRulesFile(onChange func()) (func(), error) {
 	}
 
 	dir := filepath.Dir(path)
-	base := filepath.Base(path)
+	rulesBase := filepath.Base(path)
+	userBase := filepath.Base(rm.userRulesPath())
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -37,7 +39,7 @@ func (rm *RuleManager) WatchRulesFile(onChange func()) (func(), error) {
 		return nil, err
 	}
 
-	rm.setRulesHash(fileContentHash(path))
+	rm.setRulesHash(rm.combinedRulesFileHash())
 
 	stopCh := make(chan struct{})
 	var stopOnce sync.Once
@@ -64,7 +66,7 @@ func (rm *RuleManager) WatchRulesFile(onChange func()) (func(), error) {
 					return
 				default:
 				}
-				current := fileContentHash(path)
+				current := rm.combinedRulesFileHash()
 				if current == "" || current == rm.rulesHashValue() {
 					return
 				}
@@ -83,7 +85,8 @@ func (rm *RuleManager) WatchRulesFile(onChange func()) (func(), error) {
 				if !ok {
 					return
 				}
-				if filepath.Base(ev.Name) != base {
+				base := filepath.Base(ev.Name)
+				if base != rulesBase && base != userBase {
 					continue
 				}
 				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {

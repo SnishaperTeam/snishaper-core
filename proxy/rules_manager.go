@@ -62,6 +62,13 @@ type RuleManager struct {
 
 	subscriptions     *subscription.Store
 	builtinSiteGroups []SiteGroup
+
+	// 分层规则（issue #172）：upstreamRules 是随规则更新整体替换的上游层
+	// （config.json），userRules 是永不被更新触碰、冲突时优先的用户层
+	// （config.user.json）。内存中的 siteGroups 等字段始终是两层合并后的
+	// 有效状态，保存时由 computeUserLayer 重新求差。
+	upstreamRules RulesConfig
+	userRules     UserRulesConfig
 }
 
 // SetRouteEventCallback 设置路由模式变化时的回调。
@@ -421,12 +428,31 @@ func (rm *RuleManager) loadRulesConfig() error {
 		return err
 	}
 
-	rm.siteGroups = config.SiteGroups
-	rm.upstreams = config.Upstreams
-	rm.dnsNodes = config.DNSNodes
-	rm.echProfiles = config.ECHProfiles
-	rm.nat64Profiles = config.NAT64Profiles
-	rm.setRulesHash(dataHash(data))
+	// 分层加载：config.json 是上游层，config.user.json 是用户层；用户层
+	// 缺失时把旧的单文件布局按三方合并基线拆分成两层（一次性迁移）。
+	// 两层保持文件原样（不归一化），归一化只在求差时对副本进行，保证
+	// 与远端原始内容比较不产生虚假差异。
+	user, userFileExists, err := loadUserRulesConfigFile(rm.userRulesPath())
+	if err != nil {
+		return err
+	}
+	if userFileExists {
+		rm.upstreamRules = config
+		rm.userRules = user
+	} else {
+		rm.upstreamRules, rm.userRules = rm.migrateLegacyRules(config)
+		if err := rm.saveUserRulesConfig(); err != nil {
+			rm.logf("[Config] persisting migrated user rules layer failed: %v", err)
+		}
+	}
+
+	effective := applyUserLayer(rm.upstreamRules, rm.userRules)
+	rm.siteGroups = effective.SiteGroups
+	rm.upstreams = effective.Upstreams
+	rm.dnsNodes = effective.DNSNodes
+	rm.echProfiles = effective.ECHProfiles
+	rm.nat64Profiles = effective.NAT64Profiles
+	rm.updateRulesFileHash()
 	// Ensure at least the default Ali DoH bootstrap node exists
 	if len(rm.dnsNodes) == 0 {
 		rm.dnsNodes = defaultDNSNodes()
@@ -451,6 +477,8 @@ func (rm *RuleManager) saveDefaultRulesConfig() error {
 	rm.dnsNodes = defaultDNSNodes()
 	rm.echProfiles = []ECHProfile{}
 	rm.nat64Profiles = []NAT64Profile{}
+	rm.upstreamRules = RulesConfig{}
+	rm.userRules = UserRulesConfig{}
 	rm.buildRules()
 	return rm.saveRulesConfig()
 }
@@ -1069,35 +1097,25 @@ func writeFileAtomic(path string, data []byte, perm fs.FileMode) error {
 
 func (rm *RuleManager) saveRulesConfig() error {
 	// A non-default subscription replaces siteGroups with subscription-derived
-	// rules. Persisting them would overwrite the shipped rules file and lose
-	// the user's built-in configuration, so writes are blocked until the
-	// default subscription is active again.
+	// rules. Persisting them would overwrite the layered rules and lose the
+	// user's built-in configuration, so writes are blocked until the default
+	// subscription is active again.
 	if active := rm.activeSubscriptionID(); active != "" && active != subscription.DefaultSubscriptionID {
 		rm.logf("[Subscription] skipping rules persist while subscription %q is active", active)
 		return nil
 	}
 
-	config := RulesConfig{
-		SiteGroups:    rm.siteGroups,
-		Upstreams:     rm.upstreams,
-		DNSNodes:      rm.dnsNodes,
-		ECHProfiles:   rm.echProfiles,
-		NAT64Profiles: rm.nat64Profiles,
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
+	// 分层保存（issue #172）：用户层 = 有效状态对上游层求差（改动→覆盖，
+	// 新增→用户条目，删除→墓碑），上游层保持原样，只写 config.user.json
+	// 和（内容不变的）config.json。
+	rm.recomputeUserLayer()
+	if err := rm.saveUserRulesConfig(); err != nil {
 		return err
 	}
-
-	if err := os.MkdirAll(filepath.Dir(rm.rulesPath), 0755); err != nil {
+	if err := rm.saveUpstreamRulesConfig(); err != nil {
 		return err
 	}
-
-	if err := writeFileAtomic(rm.rulesPath, data, 0644); err != nil {
-		return err
-	}
-	rm.setRulesHash(dataHash(data))
+	rm.updateRulesFileHash()
 	rm.triggerConfigSaved()
 	return nil
 }
