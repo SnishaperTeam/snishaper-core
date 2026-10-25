@@ -63,12 +63,11 @@ type RuleManager struct {
 	subscriptions     *subscription.Store
 	builtinSiteGroups []SiteGroup
 
-	// 分层规则（issue #172）：upstreamRules 是随规则更新整体替换的上游层
-	// （config.json），userRules 是永不被更新触碰、冲突时优先的用户层
-	// （config.user.json）。内存中的 siteGroups 等字段始终是两层合并后的
-	// 有效状态，保存时由 computeUserLayer 重新求差。
+	// 分层规则（issue #172，v0.7）：upstreamRules 是随规则更新整体替换的
+	// 上游备份（config.upstream.json），内存中的 siteGroups 等字段始终是
+	// 有效状态（config.json，可直接手编）。用户差量不落盘，按需由
+	// computeUserLayer 对有效状态与备份求差得出。
 	upstreamRules RulesConfig
-	userRules     UserRulesConfig
 }
 
 // SetRouteEventCallback 设置路由模式变化时的回调。
@@ -428,30 +427,55 @@ func (rm *RuleManager) loadRulesConfig() error {
 		return err
 	}
 
-	// 分层加载：config.json 是上游层，config.user.json 是用户层；用户层
-	// 缺失时把旧的单文件布局按三方合并基线拆分成两层（一次性迁移）。
-	// 两层保持文件原样（不归一化），归一化只在求差时对副本进行，保证
-	// 与远端原始内容比较不产生虚假差异。
-	user, userFileExists, err := loadUserRulesConfigFile(rm.userRulesPath())
+	// 分层加载（issue #172，v0.7）：config.json 是可直接手编的有效状态，
+	// config.upstream.json 是原样上游备份，用户差量按需由两者求差得出。
+	// 备份缺失时按旧布局一次性迁移：v0.6 双文件（config.json=上游 +
+	// config.user.json=用户差量）折叠为新布局；更早的单文件按三方合并
+	// 基线推导上游层。两个文件保持原样（不归一化），归一化只在求差时
+	// 对副本进行，保证与远端原始内容比较不产生虚假差异。
+	backup, backupExists, err := loadUpstreamRulesConfigFile(rm.upstreamRulesPath())
 	if err != nil {
 		return err
 	}
-	if userFileExists {
-		rm.upstreamRules = config
-		rm.userRules = user
-	} else {
-		rm.upstreamRules, rm.userRules = rm.migrateLegacyRules(config)
-		if err := rm.saveUserRulesConfig(); err != nil {
-			rm.logf("[Config] persisting migrated user rules layer failed: %v", err)
+	var user UserRulesConfig
+	userFileExists := false
+	if !backupExists {
+		user, userFileExists, err = loadUserRulesConfigFile(rm.userRulesPath())
+		if err != nil {
+			return err
 		}
+		if userFileExists {
+			// v0.6 → v0.7 迁移：有效状态 = 旧上游层 + 用户差量；旧上游层
+			// 原样落为备份，随后删除差量文件。
+			rm.upstreamRules = config
+			config = applyUserLayer(config, user)
+		} else {
+			rm.upstreamRules = rm.migrateLegacyRules(config)
+		}
+	} else {
+		rm.upstreamRules = backup
 	}
 
-	effective := applyUserLayer(rm.upstreamRules, rm.userRules)
-	rm.siteGroups = effective.SiteGroups
-	rm.upstreams = effective.Upstreams
-	rm.dnsNodes = effective.DNSNodes
-	rm.echProfiles = effective.ECHProfiles
-	rm.nat64Profiles = effective.NAT64Profiles
+	rm.siteGroups = config.SiteGroups
+	rm.upstreams = config.Upstreams
+	rm.dnsNodes = config.DNSNodes
+	rm.echProfiles = config.ECHProfiles
+	rm.nat64Profiles = config.NAT64Profiles
+
+	if !backupExists {
+		if err := rm.saveEffectiveRulesConfig(); err != nil {
+			rm.logf("[Config] persisting migrated effective rules failed: %v", err)
+		}
+		if err := rm.saveUpstreamRulesConfig(); err != nil {
+			rm.logf("[Config] persisting migrated upstream backup failed: %v", err)
+		}
+		if userFileExists {
+			if err := os.Remove(rm.userRulesPath()); err != nil && !os.IsNotExist(err) {
+				rm.logf("[Config] removing migrated user rules file failed: %v", err)
+			}
+			rm.logf("[Config] migrated v0.6 layered rules into effective+backup layout")
+		}
+	}
 	rm.updateRulesFileHash()
 	// Ensure at least the default Ali DoH bootstrap node exists
 	if len(rm.dnsNodes) == 0 {
@@ -477,9 +501,12 @@ func (rm *RuleManager) saveDefaultRulesConfig() error {
 	rm.dnsNodes = defaultDNSNodes()
 	rm.echProfiles = []ECHProfile{}
 	rm.nat64Profiles = []NAT64Profile{}
-	rm.upstreamRules = RulesConfig{}
-	rm.userRules = UserRulesConfig{}
+	// 全新安装：空有效状态 + 等值备份，保证求差结果为空。
+	rm.upstreamRules = RulesConfig{DNSNodes: defaultDNSNodes()}
 	rm.buildRules()
+	if err := rm.saveUpstreamRulesConfig(); err != nil {
+		return err
+	}
 	return rm.saveRulesConfig()
 }
 
@@ -1105,14 +1132,10 @@ func (rm *RuleManager) saveRulesConfig() error {
 		return nil
 	}
 
-	// 分层保存（issue #172）：用户层 = 有效状态对上游层求差（改动→覆盖，
-	// 新增→用户条目，删除→墓碑），上游层保持原样，只写 config.user.json
-	// 和（内容不变的）config.json。
-	rm.recomputeUserLayer()
-	if err := rm.saveUserRulesConfig(); err != nil {
-		return err
-	}
-	if err := rm.saveUpstreamRulesConfig(); err != nil {
+	// v0.7 分层保存（issue #172）：config.json 只写有效状态；上游备份
+	// （config.upstream.json）仅由规则更新和迁移改写。用户差量不落盘，
+	// 下次加载时由有效状态与备份求差自动恢复。
+	if err := rm.saveEffectiveRulesConfig(); err != nil {
 		return err
 	}
 	rm.updateRulesFileHash()

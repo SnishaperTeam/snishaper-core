@@ -29,6 +29,19 @@ func writeTestSyncState(t *testing.T, dir string, state rulesSyncState) {
 	}
 }
 
+func readTestRulesConfig(t *testing.T, path string) RulesConfig {
+	t.Helper()
+	var cfg RulesConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return cfg
+}
+
 func readTestUserRules(t *testing.T, dir string) UserRulesConfig {
 	t.Helper()
 	var user UserRulesConfig
@@ -51,10 +64,38 @@ func hasSiteGroup(groups []SiteGroup, id string) bool {
 	return false
 }
 
-// TestLayersFreshInstallTreatsLocalFileAsUpstream covers the no-baseline case:
-// a never-updated install keeps its shipped file as the pristine upstream
-// layer and starts with an empty user layer.
-func TestLayersFreshInstallTreatsLocalFileAsUpstream(t *testing.T) {
+// TestLayersFreshInstallWritesEffectiveAndBackup covers the empty-install
+// path: both files are created, no user layer file appears, and the effective
+// state starts equal to the backup (empty diff).
+func TestLayersFreshInstallWritesEffectiveAndBackup(t *testing.T) {
+	dir := t.TempDir()
+	rulesPath := filepath.Join(dir, "config.json")
+
+	rm := NewRuleManager(filepath.Join(dir, "settings.json"), rulesPath)
+	if err := rm.LoadConfig(); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if _, err := os.Stat(rulesPath); err != nil {
+		t.Errorf("effective file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.upstream.json")); err != nil {
+		t.Errorf("upstream backup missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.user.json")); !os.IsNotExist(err) {
+		t.Errorf("retired v0.6 user file must not be created, stat err=%v", err)
+	}
+
+	info := rm.GetRulesLayerInfo()
+	if len(info.SiteGroupLayers) != 0 {
+		t.Errorf("fresh install should have no groups, got %v", info.SiteGroupLayers)
+	}
+}
+
+// TestLayersNoBaselineTreatsLocalFileAsUpstream covers a never-updated
+// install with a shipped config.json: the file stays the effective state and
+// is also derived as the pristine upstream backup.
+func TestLayersNoBaselineTreatsLocalFileAsUpstream(t *testing.T) {
 	dir := t.TempDir()
 	rulesPath := filepath.Join(dir, "config.json")
 	writeTestRules(t, rulesPath, RulesConfig{
@@ -67,21 +108,19 @@ func TestLayersFreshInstallTreatsLocalFileAsUpstream(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 
-	if len(rm.userRules.SiteGroups) != 0 {
-		t.Errorf("fresh install should start with an empty user layer, got %d groups", len(rm.userRules.SiteGroups))
-	}
 	if !hasSiteGroup(rm.upstreamRules.SiteGroups, "g1") {
-		t.Error("shipped group should live in the upstream layer")
+		t.Error("shipped group should live in the upstream backup")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "config.user.json")); err != nil {
-		t.Errorf("migration should create the user layer file: %v", err)
+	info := rm.GetRulesLayerInfo()
+	if info.SiteGroupLayers["g1"] != "upstream" {
+		t.Errorf("untouched shipped group should be upstream, got %q", info.SiteGroupLayers["g1"])
 	}
 }
 
 // TestLayersMigrationSplitsByBaseline covers migrating a pre-layering merged
-// config.json: entries matching the three-way baseline stay upstream, user
-// edits and additions go to the user layer, and locally deleted baseline IDs
-// become tombstones.
+// config.json: entries matching the three-way baseline become the upstream
+// backup, user edits and additions stay only in the effective file, and the
+// effective state is preserved as-is.
 func TestLayersMigrationSplitsByBaseline(t *testing.T) {
 	dir := t.TempDir()
 	rulesPath := filepath.Join(dir, "config.json")
@@ -109,21 +148,15 @@ func TestLayersMigrationSplitsByBaseline(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 
-	if !hasSiteGroup(rm.upstreamRules.SiteGroups, "keep") {
-		t.Error("pristine group should stay in the upstream layer")
+	backup := readTestRulesConfig(t, filepath.Join(dir, "config.upstream.json"))
+	if !hasSiteGroup(backup.SiteGroups, "keep") {
+		t.Error("pristine group should be in the upstream backup")
 	}
-	if hasSiteGroup(rm.upstreamRules.SiteGroups, "edit") || hasSiteGroup(rm.upstreamRules.SiteGroups, "mine") {
+	if hasSiteGroup(backup.SiteGroups, "edit") || hasSiteGroup(backup.SiteGroups, "mine") {
 		t.Error("user-edited and user-created groups must not be upstream")
 	}
-	user := readTestUserRules(t, dir)
-	if !hasSiteGroup(user.SiteGroups, "edit") || !hasSiteGroup(user.SiteGroups, "mine") {
-		t.Error("user-edited and user-created groups should be persisted in the user layer")
-	}
-	if len(user.DeletedSiteGroups) != 1 || user.DeletedSiteGroups[0] != "gone" {
-		t.Errorf("locally deleted baseline group should become a tombstone, got %v", user.DeletedSiteGroups)
-	}
 
-	// Effective state keeps the user's view.
+	// Effective state keeps the user's view untouched.
 	if !hasSiteGroup(rm.siteGroups, "mine") || !hasSiteGroup(rm.siteGroups, "edit") {
 		t.Error("effective state lost user groups")
 	}
@@ -132,11 +165,91 @@ func TestLayersMigrationSplitsByBaseline(t *testing.T) {
 			t.Errorf("user edit should win, got name %q", g.Name)
 		}
 	}
+
+	info := rm.GetRulesLayerInfo()
+	if info.SiteGroupLayers["keep"] != "upstream" {
+		t.Errorf("pristine group should be upstream, got %q", info.SiteGroupLayers["keep"])
+	}
+	if info.SiteGroupLayers["edit"] != "user" {
+		// 基线只存指纹，没有原始上游内容可回退，迁移后的编辑条目诚实地
+		// 归为 user 而非 override。
+		t.Errorf("baseline-mismatched group should be user (no upstream copy to revert to), got %q", info.SiteGroupLayers["edit"])
+	}
+	if info.SiteGroupLayers["mine"] != "user" {
+		t.Errorf("created group should be user, got %q", info.SiteGroupLayers["mine"])
+	}
+}
+
+// TestLayersV06LayoutMigratesToEffectivePlusBackup covers the retired v0.6
+// layout: config.json (upstream) + config.user.json (user diff) collapse into
+// effective config.json + pristine config.upstream.json, and the diff file is
+// removed.
+func TestLayersV06LayoutMigratesToEffectivePlusBackup(t *testing.T) {
+	dir := t.TempDir()
+	rulesPath := filepath.Join(dir, "config.json")
+
+	up := RulesConfig{
+		SiteGroups: []SiteGroup{
+			{ID: "keep", Name: "keep", Mode: "mitm", Domains: []string{"keep.example"}, Enabled: true},
+			{ID: "over", Name: "over-v1", Mode: "mitm", Domains: []string{"over.example"}, Enabled: true},
+			{ID: "gone", Name: "gone", Mode: "mitm", Domains: []string{"gone.example"}, Enabled: true},
+		},
+		Upstreams: []Upstream{},
+	}
+	user := UserRulesConfig{
+		SiteGroups: []SiteGroup{
+			{ID: "over", Name: "my-version", Mode: "quic", Domains: []string{"over.example"}, Enabled: true},
+		},
+		DeletedSiteGroups: []string{"gone"},
+	}
+	writeTestRules(t, rulesPath, up)
+	userData, err := json.MarshalIndent(user, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal user rules: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.user.json"), userData, 0o644); err != nil {
+		t.Fatalf("write user rules: %v", err)
+	}
+
+	rm := NewRuleManager(filepath.Join(dir, "settings.json"), rulesPath)
+	if err := rm.LoadConfig(); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "config.user.json")); !os.IsNotExist(err) {
+		t.Errorf("v0.6 user file must be removed after migration, stat err=%v", err)
+	}
+
+	backup := readTestRulesConfig(t, filepath.Join(dir, "config.upstream.json"))
+	if !hasSiteGroup(backup.SiteGroups, "keep") || !hasSiteGroup(backup.SiteGroups, "over") || !hasSiteGroup(backup.SiteGroups, "gone") {
+		t.Errorf("backup should hold the old upstream layer verbatim, got %s", mustJSON(backup.SiteGroups))
+	}
+
+	effective := readTestRulesConfig(t, rulesPath)
+	if !hasSiteGroup(effective.SiteGroups, "keep") {
+		t.Error("effective state lost the pristine group")
+	}
+	if hasSiteGroup(effective.SiteGroups, "gone") {
+		t.Error("user-deleted group resurrected by migration")
+	}
+	for _, g := range effective.SiteGroups {
+		if g.ID == "over" && g.Name != "my-version" {
+			t.Errorf("user override lost by migration, got %q", g.Name)
+		}
+	}
+
+	info := rm.GetRulesLayerInfo()
+	if info.SiteGroupLayers["keep"] != "upstream" || info.SiteGroupLayers["over"] != "override" {
+		t.Errorf("layers wrong after migration: %v", info.SiteGroupLayers)
+	}
+	if len(info.DeletedSiteGroups) != 1 || info.DeletedSiteGroups[0] != "gone" {
+		t.Errorf("deleted group should be a derived tombstone, got %v", info.DeletedSiteGroups)
+	}
 }
 
 // TestLayersMergeReplacesUpstreamWholesale covers the remote rules update: the
-// upstream layer is replaced wholesale, the user layer file is untouched, and
-// user overrides survive.
+// backup is replaced wholesale, the effective file is rebuilt as new upstream
+// + derived user diff, and user overrides survive.
 func TestLayersMergeReplacesUpstreamWholesale(t *testing.T) {
 	dir := t.TempDir()
 	rulesPath := filepath.Join(dir, "config.json")
@@ -172,11 +285,6 @@ func TestLayersMergeReplacesUpstreamWholesale(t *testing.T) {
 	}
 	if customID == "" {
 		t.Fatal("custom group not found")
-	}
-
-	userBefore, err := os.ReadFile(filepath.Join(dir, "config.user.json"))
-	if err != nil {
-		t.Fatalf("read user layer: %v", err)
 	}
 
 	// Remote revision v2: "changed" updated, "dropped" removed, "fresh" added.
@@ -226,26 +334,16 @@ func TestLayersMergeReplacesUpstreamWholesale(t *testing.T) {
 		t.Error("user-created group lost after merge")
 	}
 
-	// The user layer file is never touched by updates.
-	userAfter, err := os.ReadFile(filepath.Join(dir, "config.user.json"))
-	if err != nil {
-		t.Fatalf("read user layer: %v", err)
-	}
-	if string(userBefore) != string(userAfter) {
-		t.Error("user layer file must not change during a rules update")
+	// The backup on disk equals the remote revision.
+	backup := readTestRulesConfig(t, filepath.Join(dir, "config.upstream.json"))
+	if !sameJSON(backup, v2) {
+		t.Errorf("backup should hold exactly the remote revision, got %s", mustJSON(backup.SiteGroups))
 	}
 
-	// The upstream layer on disk equals the remote revision.
-	var onDisk RulesConfig
-	data, err := os.ReadFile(rulesPath)
-	if err != nil {
-		t.Fatalf("read upstream layer: %v", err)
-	}
-	if err := json.Unmarshal(data, &onDisk); err != nil {
-		t.Fatalf("parse upstream layer: %v", err)
-	}
-	if len(onDisk.SiteGroups) != len(v2.SiteGroups) {
-		t.Errorf("upstream layer should hold exactly the remote groups, got %d", len(onDisk.SiteGroups))
+	// The effective file on disk matches the rebuilt state (survives reload).
+	effectiveOnDisk := readTestRulesConfig(t, rulesPath)
+	if !hasSiteGroup(effectiveOnDisk.SiteGroups, customID) || !hasSiteGroup(effectiveOnDisk.SiteGroups, "fresh") {
+		t.Errorf("effective file should hold user + new upstream groups, got %s", mustJSON(effectiveOnDisk.SiteGroups))
 	}
 
 	if rm.RemoteRulesHash() != "hash-v2" {
@@ -253,9 +351,77 @@ func TestLayersMergeReplacesUpstreamWholesale(t *testing.T) {
 	}
 }
 
+// TestLayersHandEditSurvivesUpdate covers the v0.7 headline: a hand edit of
+// config.json is picked up as user state without any marker file and survives
+// a wholesale rules update.
+func TestLayersHandEditSurvivesUpdate(t *testing.T) {
+	dir := t.TempDir()
+	rulesPath := filepath.Join(dir, "config.json")
+	v1 := RulesConfig{
+		SiteGroups: []SiteGroup{
+			{ID: "a", Name: "a", Mode: "mitm", Domains: []string{"a.example"}, Enabled: true},
+			{ID: "b", Name: "b", Mode: "mitm", Domains: []string{"b.example"}, Enabled: true},
+		},
+		Upstreams: []Upstream{},
+	}
+	writeTestRules(t, rulesPath, v1)
+
+	rm := NewRuleManager(filepath.Join(dir, "settings.json"), rulesPath)
+	if err := rm.LoadConfig(); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	// Hand-edit the working file: override "a", add "mine".
+	handEdited := RulesConfig{
+		SiteGroups: []SiteGroup{
+			{ID: "a", Name: "a-hand-edited", Mode: "quic", Domains: []string{"a.example"}, Enabled: true},
+			{ID: "b", Name: "b", Mode: "mitm", Domains: []string{"b.example"}, Enabled: true},
+			{ID: "mine", Name: "mine", Mode: "mitm", Domains: []string{"mine.example"}, Enabled: true},
+		},
+		Upstreams: []Upstream{},
+	}
+	writeTestRules(t, rulesPath, handEdited)
+
+	rm2 := NewRuleManager(filepath.Join(dir, "settings.json"), rulesPath)
+	if err := rm2.LoadConfig(); err != nil {
+		t.Fatalf("reload LoadConfig: %v", err)
+	}
+	info := rm2.GetRulesLayerInfo()
+	if info.SiteGroupLayers["a"] != "override" {
+		t.Errorf("hand-edited group should be an override, got %q", info.SiteGroupLayers["a"])
+	}
+	if info.SiteGroupLayers["mine"] != "user" {
+		t.Errorf("hand-added group should be layer user, got %q", info.SiteGroupLayers["mine"])
+	}
+
+	// Wholesale update replaces "a" and "b" upstream; the hand edit must win.
+	v2 := RulesConfig{
+		SiteGroups: []SiteGroup{
+			{ID: "a", Name: "a-v2", Mode: "mitm", Domains: []string{"a.example"}, Enabled: true},
+			{ID: "b", Name: "b-v2", Mode: "mitm", Domains: []string{"b.example"}, Enabled: true},
+		},
+		Upstreams: []Upstream{},
+	}
+	if _, err := rm2.MergeRemoteRules(v2, "hash-v2"); err != nil {
+		t.Fatalf("MergeRemoteRules: %v", err)
+	}
+	for _, g := range rm2.siteGroups {
+		if g.ID == "a" && g.Name != "a-hand-edited" {
+			t.Errorf("hand edit lost after update, got %q", g.Name)
+		}
+		if g.ID == "b" && g.Name != "b-v2" {
+			t.Errorf("untouched group should follow upstream, got %q", g.Name)
+		}
+	}
+	if !hasSiteGroup(rm2.siteGroups, "mine") {
+		t.Error("hand-added group lost after update")
+	}
+}
+
 // TestLayersDeleteUpstreamGroupPersistsAsTombstone covers deleting an upstream
-// group: it becomes a tombstone that hides the group across rule updates until
-// it is explicitly reverted.
+// group: it disappears from the effective file while the backup keeps it, the
+// deletion survives a wholesale upstream refresh until it is explicitly
+// reverted.
 func TestLayersDeleteUpstreamGroupPersistsAsTombstone(t *testing.T) {
 	dir := t.TempDir()
 	rulesPath := filepath.Join(dir, "config.json")
@@ -275,12 +441,16 @@ func TestLayersDeleteUpstreamGroupPersistsAsTombstone(t *testing.T) {
 	if err := rm.DeleteSiteGroup("victim"); err != nil {
 		t.Fatalf("DeleteSiteGroup: %v", err)
 	}
-	user := readTestUserRules(t, dir)
-	if len(user.DeletedSiteGroups) != 1 || user.DeletedSiteGroups[0] != "victim" {
-		t.Fatalf("delete should persist as a tombstone, got %v", user.DeletedSiteGroups)
+	info := rm.GetRulesLayerInfo()
+	if len(info.DeletedSiteGroups) != 1 || info.DeletedSiteGroups[0] != "victim" {
+		t.Fatalf("delete should derive a tombstone, got %v", info.DeletedSiteGroups)
+	}
+	backup := readTestRulesConfig(t, filepath.Join(dir, "config.upstream.json"))
+	if !hasSiteGroup(backup.SiteGroups, "victim") {
+		t.Error("backup must keep the deleted group so it can be restored")
 	}
 
-	// The group must stay hidden across a wholesale upstream refresh.
+	// The deletion must survive a wholesale upstream refresh.
 	remote := RulesConfig{SiteGroups: []SiteGroup{
 		{ID: "victim", Name: "victim", Mode: "mitm", Domains: []string{"victim.example"}, Enabled: true},
 		{ID: "other", Name: "other", Mode: "mitm", Domains: []string{"other.example"}, Enabled: true},
@@ -289,7 +459,7 @@ func TestLayersDeleteUpstreamGroupPersistsAsTombstone(t *testing.T) {
 		t.Fatalf("MergeRemoteRules: %v", err)
 	}
 	if hasSiteGroup(rm.siteGroups, "victim") {
-		t.Error("tombstoned group resurrected by rules update")
+		t.Error("deleted group resurrected by rules update")
 	}
 
 	// Reverting restores it.
@@ -297,16 +467,16 @@ func TestLayersDeleteUpstreamGroupPersistsAsTombstone(t *testing.T) {
 		t.Fatalf("RevertSiteGroupToUpstream: %v", err)
 	}
 	if !hasSiteGroup(rm.siteGroups, "victim") {
-		t.Error("revert should restore the tombstoned upstream group")
+		t.Error("revert should restore the deleted upstream group")
 	}
-	user = readTestUserRules(t, dir)
-	if len(user.DeletedSiteGroups) != 0 {
-		t.Errorf("revert should clear the tombstone, got %v", user.DeletedSiteGroups)
+	info = rm.GetRulesLayerInfo()
+	if len(info.DeletedSiteGroups) != 0 {
+		t.Errorf("revert should clear the tombstone, got %v", info.DeletedSiteGroups)
 	}
 }
 
 // TestLayersRevertOverrideAndUserGroup covers the revert semantics: an override
-// falls back to the upstream copy, a user-created group is removed.
+// falls back to the backup copy, a user-created group is removed.
 func TestLayersRevertOverrideAndUserGroup(t *testing.T) {
 	dir := t.TempDir()
 	rulesPath := filepath.Join(dir, "config.json")
@@ -352,9 +522,11 @@ func TestLayersRevertOverrideAndUserGroup(t *testing.T) {
 			t.Errorf("override revert should restore the upstream copy, got %q/%q", g.Name, g.Mode)
 		}
 	}
-	user := readTestUserRules(t, dir)
-	if hasSiteGroup(user.SiteGroups, "base") {
-		t.Error("override should be dropped from the user layer on revert")
+	effective := readTestRulesConfig(t, rulesPath)
+	for _, g := range effective.SiteGroups {
+		if g.ID == "base" && g.Name != "base" {
+			t.Errorf("effective file should hold the restored copy after revert, got %q", g.Name)
+		}
 	}
 
 	// Revert the user-created group removes it.
@@ -411,14 +583,13 @@ func TestLayersRoundtripAfterSave(t *testing.T) {
 	}
 	after := rm2.effectiveRulesConfig()
 
-	// A second save must be a no-op on the user layer (idempotent diff).
-	userBefore := readTestUserRules(t, dir)
+	// A second save must be a no-op on disk (idempotent diff).
 	if err := rm2.SaveConfig(); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
-	userAfter := readTestUserRules(t, dir)
-	if !sameJSON(userBefore, userAfter) {
-		t.Error("second save should not change the user layer")
+	afterSave := readTestRulesConfig(t, rulesPath)
+	if !sameJSON(after, afterSave) {
+		t.Error("second save should not change the effective state")
 	}
 
 	// Reload again: the effective state must be fully stable.

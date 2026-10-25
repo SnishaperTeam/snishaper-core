@@ -4,26 +4,35 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
-// Two-layer rules layout (issue #172):
+// Layered rules layout (issue #172, v0.7):
 //
-//	rules/config.json        upstream layer, replaced wholesale on rule updates
-//	rules/config.user.json   user layer, never touched by updates, wins on conflict
+//	rules/config.json          effective state, hand-editable working file
+//	rules/config.upstream.json pristine upstream backup, replaced wholesale
+//	                           by rule updates, never normalized
 //
-// Reverting an override is "remove the entry from the user file"; a structural
-// override (e.g. a group split into several custom groups) is reverted by
-// dropping those groups, which falls back to the upstream group untouched.
+// The user diff is not persisted: it is derived on demand by diffing the
+// effective state against the backup, so hand edits to config.json land in
+// the user layer automatically. A rule update replaces the backup, then
+// rebuilds the effective state as new upstream + derived diff (user wins on
+// conflict) and rewrites config.json. Reverting an override is "copy the
+// entry back from the backup".
+//
+// Legacy layouts migrate on load in one shot: v0.6 (config.json = pristine
+// upstream + config.user.json = user diff) collapses into the pair above;
+// pre-layering single files keep config.json as the effective state and get
+// their upstream layer derived from the three-way merge baseline.
 
-// UserRulesConfig is the config.user.json structure: the user layer of the
-// rules layout. Entries with the same ID as an upstream entry override it;
-// entries without an upstream counterpart stand on their own (this also keeps
-// overrides alive when upstream later drops the original). The Deleted* lists
-// are tombstones for upstream entries the user deleted: they hide the upstream
-// entry until RevertSiteGroupToUpstream / RevertUpstreamConfigToUpstream (or a
-// manual user-file edit) removes them.
+// UserRulesConfig is the in-memory user diff: entries with the same ID as an
+// upstream entry override it; entries without an upstream counterpart stand on
+// their own (this also keeps overrides alive when upstream later drops the
+// original). The Deleted* lists are tombstones for upstream entries the user
+// deleted: they hide the upstream entry until
+// RevertSiteGroupToUpstream / RevertUpstreamConfigToUpstream removes them.
+// It is also the structure of the retired v0.6 config.user.json, read only
+// during migration.
 type UserRulesConfig struct {
 	SiteGroups    []SiteGroup    `json:"site_groups,omitempty"`
 	Upstreams     []Upstream     `json:"upstreams,omitempty"`
@@ -38,8 +47,21 @@ type UserRulesConfig struct {
 	DeletedNAT64Profiles []string `json:"deleted_nat64_profiles,omitempty"`
 }
 
-// userRulesPath derives the user layer path from the rules path:
-// config.json -> config.user.json.
+// upstreamRulesPath derives the upstream backup path from the rules path:
+// config.json -> config.upstream.json.
+func (rm *RuleManager) upstreamRulesPath() string {
+	if rm.rulesPath == "" {
+		return ""
+	}
+	ext := filepath.Ext(rm.rulesPath)
+	if ext == "" {
+		return rm.rulesPath + ".upstream.json"
+	}
+	return strings.TrimSuffix(rm.rulesPath, ext) + ".upstream" + ext
+}
+
+// userRulesPath derives the retired v0.6 user layer path; only read and
+// deleted when migrating that layout.
 func (rm *RuleManager) userRulesPath() string {
 	if rm.rulesPath == "" {
 		return ""
@@ -121,32 +143,33 @@ func diffBy[T any](effective, up []T, id func(T) string, equal func(a, b T) bool
 	return kept, deleted
 }
 
-func siteGroupID(g SiteGroup) string     { return g.ID }
-func upstreamID(u Upstream) string       { return u.ID }
-func dnsNodeID(n DNSNode) string         { return n.ID }
-func echProfileID(p ECHProfile) string   { return p.ID }
+func siteGroupID(g SiteGroup) string       { return g.ID }
+func upstreamID(u Upstream) string         { return u.ID }
+func dnsNodeID(n DNSNode) string           { return n.ID }
+func echProfileID(p ECHProfile) string     { return p.ID }
 func nat64ProfileID(p NAT64Profile) string { return p.ID }
 
 // applyUserLayer overlays the user layer on the upstream layer. User entries
 // win on conflict; tombstones hide their upstream entries.
 func applyUserLayer(up RulesConfig, user UserRulesConfig) RulesConfig {
 	return RulesConfig{
-		SiteGroups: overlayBy(up.SiteGroups, user.SiteGroups, user.DeletedSiteGroups, siteGroupID),
-		Upstreams:  overlayBy(up.Upstreams, user.Upstreams, user.DeletedUpstreams, upstreamID),
-		DNSNodes:   overlayBy(up.DNSNodes, user.DNSNodes, user.DeletedDNSNodes, dnsNodeID),
-		ECHProfiles: overlayBy(up.ECHProfiles, user.ECHProfiles, user.DeletedECHProfiles, echProfileID),
+		SiteGroups:    overlayBy(up.SiteGroups, user.SiteGroups, user.DeletedSiteGroups, siteGroupID),
+		Upstreams:     overlayBy(up.Upstreams, user.Upstreams, user.DeletedUpstreams, upstreamID),
+		DNSNodes:      overlayBy(up.DNSNodes, user.DNSNodes, user.DeletedDNSNodes, dnsNodeID),
+		ECHProfiles:   overlayBy(up.ECHProfiles, user.ECHProfiles, user.DeletedECHProfiles, echProfileID),
 		NAT64Profiles: overlayBy(up.NAT64Profiles, user.NAT64Profiles, user.DeletedNAT64Profiles, nat64ProfileID),
 	}
 }
 
 // computeUserLayer derives the user layer by diffing the effective state
 // against the pristine upstream layer. This routes every mutation (add, edit,
-// delete, import, profile sync) to the right layer automatically: editing an
-// upstream entry turns it into a user override, editing a user entry keeps it
-// in the user layer, and deleting an upstream entry becomes a tombstone.
-// Both sides are normalized on copies first so normalization artifacts (the
-// Website/DNSMode fixups LoadConfig applies to the effective state) are not
-// misdetected as user overrides; the layers themselves stay pristine.
+// delete, import, profile sync, hand edit of config.json) to the right layer
+// automatically: editing an upstream entry turns it into a user override,
+// editing a user entry keeps it in the user layer, and deleting an upstream
+// entry becomes a tombstone. Both sides are normalized on copies first so
+// normalization artifacts (the Website/DNSMode fixups LoadConfig applies to
+// the effective state) are not misdetected as user overrides; the layers
+// themselves stay pristine.
 func computeUserLayer(effective, up RulesConfig) UserRulesConfig {
 	var user UserRulesConfig
 	effGroups := append([]SiteGroup(nil), effective.SiteGroups...)
@@ -171,44 +194,6 @@ func computeUserLayer(effective, up RulesConfig) UserRulesConfig {
 	return user
 }
 
-// recomputeUserLayer rebuilds rm.userRules from the effective state. Tombstones
-// for IDs the upstream layer no longer carries (e.g. migration-detected
-// deletions) cannot be re-derived from the diff, so they are carried over.
-func (rm *RuleManager) recomputeUserLayer() {
-	user := computeUserLayer(rm.effectiveRulesConfig(), rm.upstreamRules)
-	user.DeletedSiteGroups = carryOverTombstones(user.DeletedSiteGroups, rm.userRules.DeletedSiteGroups, rm.upstreamRules.SiteGroups, siteGroupID)
-	user.DeletedUpstreams = carryOverTombstones(user.DeletedUpstreams, rm.userRules.DeletedUpstreams, rm.upstreamRules.Upstreams, upstreamID)
-	user.DeletedDNSNodes = carryOverTombstones(user.DeletedDNSNodes, rm.userRules.DeletedDNSNodes, rm.upstreamRules.DNSNodes, dnsNodeID)
-	user.DeletedECHProfiles = carryOverTombstones(user.DeletedECHProfiles, rm.userRules.DeletedECHProfiles, rm.upstreamRules.ECHProfiles, echProfileID)
-	user.DeletedNAT64Profiles = carryOverTombstones(user.DeletedNAT64Profiles, rm.userRules.DeletedNAT64Profiles, rm.upstreamRules.NAT64Profiles, nat64ProfileID)
-	rm.userRules = user
-}
-
-// carryOverTombstones keeps tombstones whose ID the upstream layer no longer
-// lists; they stay harmless (they only mask upstream entries) and keep working
-// when upstream re-introduces the entry later.
-func carryOverTombstones[T any](fresh, old []string, up []T, id func(T) string) []string {
-	if len(old) == 0 {
-		return fresh
-	}
-	upIDs := make(map[string]bool, len(up))
-	for _, u := range up {
-		upIDs[id(u)] = true
-	}
-	seen := make(map[string]bool, len(fresh))
-	for _, d := range fresh {
-		seen[d] = true
-	}
-	for _, d := range old {
-		if !seen[d] && !upIDs[d] {
-			fresh = append(fresh, d)
-			seen[d] = true
-		}
-	}
-	sort.Strings(fresh)
-	return fresh
-}
-
 // normalizeSiteGroupsForLayer applies the same normalization LoadConfig runs
 // on the effective state to a raw layer, so layer diffs are not polluted by
 // normalization artifacts (a normalized group would otherwise look like a user
@@ -224,9 +209,28 @@ func normalizeSiteGroupsForLayer(groups []SiteGroup, profiles *[]ECHProfile) {
 	migrateLegacyECHRules(groups, profiles)
 }
 
-// loadUserRulesConfigFile parses the user layer file; a missing file yields an
-// empty layer, a corrupt file is reported but does not brick the app (it is
-// rewritten from the effective state on the next save).
+// loadUpstreamRulesConfigFile parses the pristine upstream backup; a missing
+// file yields (zero, false, nil) so the caller can fall back to migration, a
+// corrupt file is a hard error (silently re-deriving the backup from the
+// effective state would absorb user edits into the upstream layer).
+func loadUpstreamRulesConfigFile(path string) (RulesConfig, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return RulesConfig{}, false, nil
+		}
+		return RulesConfig{}, false, err
+	}
+	var cfg RulesConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return RulesConfig{}, true, err
+	}
+	return cfg, true, nil
+}
+
+// loadUserRulesConfigFile parses the retired v0.6 user layer file; a missing
+// file yields an empty layer, a corrupt file is reported but does not brick
+// the app (migration then treats the effective file as-is).
 func loadUserRulesConfigFile(path string) (UserRulesConfig, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -242,73 +246,54 @@ func loadUserRulesConfigFile(path string) (UserRulesConfig, bool, error) {
 	return user, true, nil
 }
 
-// migrateLegacyRules splits a pre-layering merged config.json into the
-// upstream and user layers. The three-way merge baseline
-// (rules_remote_sync.json) holds fingerprints of the last applied remote
-// revision: entries still matching it are pristine upstream, everything else
-// is a user override or addition. Baseline IDs missing locally were deleted by
-// the user and become tombstones. Without a baseline (rules never updated) the
-// local file is treated as pristine upstream, matching the old merge behaviour
-// for untouched installs.
-func (rm *RuleManager) migrateLegacyRules(current RulesConfig) (RulesConfig, UserRulesConfig) {
+// copyRulesConfig returns a shallow copy with fresh slices so the upstream
+// backup never shares a backing array with the effective state (the mutators
+// edit rm.siteGroups in place and would corrupt an aliased backup).
+func copyRulesConfig(cfg RulesConfig) RulesConfig {
+	return RulesConfig{
+		SiteGroups:    append([]SiteGroup(nil), cfg.SiteGroups...),
+		Upstreams:     append([]Upstream(nil), cfg.Upstreams...),
+		DNSNodes:      append([]DNSNode(nil), cfg.DNSNodes...),
+		ECHProfiles:   append([]ECHProfile(nil), cfg.ECHProfiles...),
+		NAT64Profiles: append([]NAT64Profile(nil), cfg.NAT64Profiles...),
+	}
+}
+
+// migrateLegacyRules derives the upstream layer from a pre-layering merged
+// config.json (which stays the effective state). Entries matching the
+// three-way merge baseline (rules_remote_sync.json, fingerprints of the last
+// applied remote revision) are pristine upstream; everything else counts as
+// user state and stays only in the effective file. Without a baseline (rules
+// never updated) the whole file is treated as pristine upstream, matching the
+// old merge behaviour for untouched installs.
+func (rm *RuleManager) migrateLegacyRules(current RulesConfig) RulesConfig {
 	baseline := rm.loadSyncState()
 	if len(baseline.Groups) == 0 && len(baseline.Upstreams) == 0 {
-		return current, UserRulesConfig{}
+		return copyRulesConfig(current)
 	}
 
 	up := RulesConfig{}
-	user := UserRulesConfig{}
-
-	currentGroupIDs := make(map[string]bool, len(current.SiteGroups))
 	for _, g := range current.SiteGroups {
-		currentGroupIDs[g.ID] = true
 		if fp, ok := baseline.Groups[g.ID]; ok && fp == jsonFingerprint(g) {
 			up.SiteGroups = append(up.SiteGroups, g)
-			continue
 		}
-		user.SiteGroups = append(user.SiteGroups, g)
 	}
-	currentUpstreamIDs := make(map[string]bool, len(current.Upstreams))
 	for _, u := range current.Upstreams {
-		currentUpstreamIDs[u.ID] = true
 		if fp, ok := baseline.Upstreams[u.ID]; ok && fp == jsonFingerprint(u) {
 			up.Upstreams = append(up.Upstreams, u)
-			continue
-		}
-		user.Upstreams = append(user.Upstreams, u)
-	}
-
-	for id := range baseline.Groups {
-		if !currentGroupIDs[id] {
-			user.DeletedSiteGroups = append(user.DeletedSiteGroups, id)
 		}
 	}
-	for id := range baseline.Upstreams {
-		if !currentUpstreamIDs[id] {
-			user.DeletedUpstreams = append(user.DeletedUpstreams, id)
-		}
-	}
-	sort.Strings(user.DeletedSiteGroups)
-	sort.Strings(user.DeletedUpstreams)
-
-	// The old merge never updated DNS nodes, ECH profiles or NAT64 profiles
-	// (it only added missing ones), so every local entry is kept as-is in the
-	// user layer; remote-only entries are still added by applyUserLayer.
-	user.DNSNodes = current.DNSNodes
-	user.ECHProfiles = current.ECHProfiles
-	user.NAT64Profiles = current.NAT64Profiles
-
-	rm.logf("[Config] migrated merged rules file into layers: %d upstream + %d user site groups (%d deleted upstream)",
-		len(up.SiteGroups), len(user.SiteGroups), len(user.DeletedSiteGroups))
-	return up, user
+	rm.logf("[Config] derived upstream layer from merged rules file: %d of %d site groups pristine",
+		len(up.SiteGroups), len(current.SiteGroups))
+	return up
 }
 
-func (rm *RuleManager) saveUserRulesConfig() error {
-	path := rm.userRulesPath()
+// writeRulesConfigFile marshals cfg to path; callers must hold rm.mu.
+func writeRulesConfigFile(path string, cfg RulesConfig) error {
 	if path == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(rm.userRules, "", "  ")
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -318,28 +303,26 @@ func (rm *RuleManager) saveUserRulesConfig() error {
 	return writeFileAtomic(path, data, 0644)
 }
 
-func (rm *RuleManager) saveUpstreamRulesConfig() error {
-	if rm.rulesPath == "" {
-		return nil
-	}
-	data, err := json.MarshalIndent(rm.upstreamRules, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(rm.rulesPath), 0755); err != nil {
-		return err
-	}
-	return writeFileAtomic(rm.rulesPath, data, 0644)
+// saveEffectiveRulesConfig persists the effective state to config.json;
+// callers must hold rm.mu.
+func (rm *RuleManager) saveEffectiveRulesConfig() error {
+	return writeRulesConfigFile(rm.rulesPath, rm.effectiveRulesConfig())
 }
 
-// updateRulesFileHash records the combined content hash of both layer files so
+// saveUpstreamRulesConfig persists the pristine upstream layer to
+// config.upstream.json; callers must hold rm.mu.
+func (rm *RuleManager) saveUpstreamRulesConfig() error {
+	return writeRulesConfigFile(rm.upstreamRulesPath(), rm.upstreamRules)
+}
+
+// updateRulesFileHash records the combined content hash of both rules files so
 // the file watcher can tell real external changes from our own writes.
 func (rm *RuleManager) updateRulesFileHash() {
 	rm.setRulesHash(rm.combinedRulesFileHash())
 }
 
 func (rm *RuleManager) combinedRulesFileHash() string {
-	return fileContentHash(rm.rulesPath) + "|" + fileContentHash(rm.userRulesPath())
+	return fileContentHash(rm.rulesPath) + "|" + fileContentHash(rm.upstreamRulesPath())
 }
 
 // RulesLayerInfo reports which layer each effective rule belongs to, so the
@@ -352,7 +335,7 @@ type RulesLayerInfo struct {
 	UpstreamLayers    map[string]string `json:"upstream_layers,omitempty"`
 	DeletedSiteGroups []string          `json:"deleted_site_groups,omitempty"`
 	DeletedUpstreams  []string          `json:"deleted_upstreams,omitempty"`
-	UserRulesPath     string            `json:"user_rules_path,omitempty"`
+	UpstreamRulesPath string            `json:"upstream_rules_path,omitempty"`
 }
 
 func layerOf(id string, inUser map[string]bool, inUpstream map[string]bool) string {
@@ -367,21 +350,23 @@ func layerOf(id string, inUser map[string]bool, inUpstream map[string]bool) stri
 }
 
 // GetRulesLayerInfo describes the layer of every effective site group and
-// upstream, plus the tombstoned (user-deleted) upstream IDs.
+// upstream, plus the tombstoned (user-deleted) upstream IDs. The user diff is
+// derived on demand from the effective state and the upstream backup.
 func (rm *RuleManager) GetRulesLayerInfo() RulesLayerInfo {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
 
-	userGroups := make(map[string]bool, len(rm.userRules.SiteGroups))
-	for _, g := range rm.userRules.SiteGroups {
+	user := computeUserLayer(rm.effectiveRulesConfig(), rm.upstreamRules)
+	userGroups := make(map[string]bool, len(user.SiteGroups))
+	for _, g := range user.SiteGroups {
 		userGroups[g.ID] = true
 	}
 	upGroups := make(map[string]bool, len(rm.upstreamRules.SiteGroups))
 	for _, g := range rm.upstreamRules.SiteGroups {
 		upGroups[g.ID] = true
 	}
-	userUps := make(map[string]bool, len(rm.userRules.Upstreams))
-	for _, u := range rm.userRules.Upstreams {
+	userUps := make(map[string]bool, len(user.Upstreams))
+	for _, u := range user.Upstreams {
 		userUps[u.ID] = true
 	}
 	upUps := make(map[string]bool, len(rm.upstreamRules.Upstreams))
@@ -392,9 +377,9 @@ func (rm *RuleManager) GetRulesLayerInfo() RulesLayerInfo {
 	info := RulesLayerInfo{
 		SiteGroupLayers:   make(map[string]string, len(rm.siteGroups)),
 		UpstreamLayers:    make(map[string]string, len(rm.upstreams)),
-		DeletedSiteGroups: append([]string(nil), rm.userRules.DeletedSiteGroups...),
-		DeletedUpstreams:  append([]string(nil), rm.userRules.DeletedUpstreams...),
-		UserRulesPath:     rm.userRulesPath(),
+		DeletedSiteGroups: append([]string(nil), user.DeletedSiteGroups...),
+		DeletedUpstreams:  append([]string(nil), user.DeletedUpstreams...),
+		UpstreamRulesPath: rm.upstreamRulesPath(),
 	}
 	for _, g := range rm.siteGroups {
 		info.SiteGroupLayers[g.ID] = layerOf(g.ID, userGroups, upGroups)

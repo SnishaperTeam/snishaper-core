@@ -18,8 +18,9 @@ func (rm *RuleManager) RulesPath() string {
 	return rm.rulesPath
 }
 
-// WatchRulesFile calls onChange when either rules layer file (upstream
-// config.json or user config.user.json) changes, returning a stop function.
+// WatchRulesFile calls onChange when either rules file (the effective
+// config.json or the upstream backup config.upstream.json) changes, returning
+// a stop function.
 func (rm *RuleManager) WatchRulesFile(onChange func()) (func(), error) {
 	path := rm.rulesPath
 	if path == "" {
@@ -28,7 +29,7 @@ func (rm *RuleManager) WatchRulesFile(onChange func()) (func(), error) {
 
 	dir := filepath.Dir(path)
 	rulesBase := filepath.Base(path)
-	userBase := filepath.Base(rm.userRulesPath())
+	upstreamBase := filepath.Base(rm.upstreamRulesPath())
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -86,7 +87,7 @@ func (rm *RuleManager) WatchRulesFile(onChange func()) (func(), error) {
 					return
 				}
 				base := filepath.Base(ev.Name)
-				if base != rulesBase && base != userBase {
+				if base != rulesBase && base != upstreamBase {
 					continue
 				}
 				if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {

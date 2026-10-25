@@ -102,11 +102,12 @@ func (rm *RuleManager) CurrentRulesHash() string {
 	return rm.rulesHashValue()
 }
 
-// MergeRemoteRules applies a remote rules revision (issue #172): the upstream
-// layer (rules/config.json) is replaced wholesale, the user layer
-// (rules/config.user.json) is never touched and wins on conflict. Reverting a
-// broken override therefore stays "delete that entry from the user file", and
-// a structural override is reverted by dropping the user-layer groups.
+// MergeRemoteRules applies a remote rules revision (issue #172, v0.7): the
+// pristine upstream backup (rules/config.upstream.json) is replaced wholesale,
+// the user diff is derived from the effective state before the swap, and the
+// effective state is rebuilt as new upstream + derived diff (user wins on
+// conflict) and rewritten to rules/config.json. Hand edits of the working file
+// therefore survive updates exactly like GUI edits.
 func (rm *RuleManager) MergeRemoteRules(remote RulesConfig, remoteHash string) (RulesMergeSummary, error) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
@@ -125,8 +126,12 @@ func (rm *RuleManager) MergeRemoteRules(remote RulesConfig, remoteHash string) (
 		normalizeECHProfile(&oldEffNorm.ECHProfiles[i])
 	}
 
+	// 用户差量在替换备份之前从当前有效状态推导：GUI 的增删改和手编
+	// config.json 的改动全部自动落在用户层，更新时优先于上游。
+	user := computeUserLayer(oldEffective, oldUpstream)
+
 	rm.upstreamRules = remote
-	newEffective := applyUserLayer(rm.upstreamRules, rm.userRules)
+	newEffective := applyUserLayer(remote, user)
 	normalizeSiteGroupsForLayer(newEffective.SiteGroups, &newEffective.ECHProfiles)
 	for i := range newEffective.ECHProfiles {
 		normalizeECHProfile(&newEffective.ECHProfiles[i])
@@ -134,11 +139,17 @@ func (rm *RuleManager) MergeRemoteRules(remote RulesConfig, remoteHash string) (
 
 	var sum RulesMergeSummary
 	if active := rm.activeSubscriptionID(); active != "" && active != subscription.DefaultSubscriptionID {
-		// 订阅视图不受规则更新影响：上游层照常整体替换并落盘，生效规则
-		// 留到切回默认规则时再从两层重建。
+		// 订阅视图不受规则更新影响：备份照常整体替换并落盘，生效规则
+		// 留到切回默认规则时再从有效状态与备份推导。
 		sum.Details = append(sum.Details, "remote revision stored while subscription "+active+" is active; effective rules untouched")
+		if !sameJSON(oldUpstream, remote) {
+			if err := rm.saveUpstreamRulesConfig(); err != nil {
+				return sum, err
+			}
+			rm.updateRulesFileHash()
+		}
 	} else {
-		sum = summarizeLayers(oldEffNorm, newEffective, oldUpstream, remote, rm.userRules)
+		sum = summarizeLayers(oldEffNorm, newEffective, oldUpstream, remote, user)
 		rm.siteGroups = newEffective.SiteGroups
 		rm.upstreams = newEffective.Upstreams
 		rm.dnsNodes = newEffective.DNSNodes
@@ -147,10 +158,12 @@ func (rm *RuleManager) MergeRemoteRules(remote RulesConfig, remoteHash string) (
 		rm.buildRules()
 		// buildRules 之后刷新内置快照，切回默认订阅时恢复的才是最新规则。
 		rm.builtinSiteGroups = append([]SiteGroup(nil), rm.siteGroups...)
-	}
-
-	if !sameJSON(oldUpstream, remote) {
-		if err := rm.saveUpstreamRulesConfig(); err != nil {
+		if !sameJSON(oldUpstream, remote) {
+			if err := rm.saveUpstreamRulesConfig(); err != nil {
+				return sum, err
+			}
+		}
+		if err := rm.saveEffectiveRulesConfig(); err != nil {
 			return sum, err
 		}
 		rm.updateRulesFileHash()
