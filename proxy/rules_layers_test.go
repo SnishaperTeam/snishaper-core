@@ -543,6 +543,48 @@ func TestLayersRevertOverrideAndUserGroup(t *testing.T) {
 	}
 }
 
+// TestLayersEditBackToUpstreamClearsOverride locks the GUI contract from
+// issue #172: once a group's user diff is gone (values edited back to the
+// upstream copy), its layer falls back to "upstream", so the "modified"
+// badge and the revert button disappear without any extra action.
+func TestLayersEditBackToUpstreamClearsOverride(t *testing.T) {
+	dir := t.TempDir()
+	rulesPath := filepath.Join(dir, "config.json")
+	writeTestRules(t, rulesPath, RulesConfig{
+		SiteGroups: []SiteGroup{{ID: "base", Name: "base", Mode: "mitm", Domains: []string{"base.example"}, Enabled: true}},
+		Upstreams:  []Upstream{},
+	})
+
+	rm := NewRuleManager(filepath.Join(dir, "settings.json"), rulesPath)
+	if err := rm.LoadConfig(); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	// Override, then edit the values back to the upstream copy.
+	if err := rm.UpdateSiteGroup(SiteGroup{ID: "base", Name: "mine", Mode: "quic", Domains: []string{"base.example"}, Enabled: true}); err != nil {
+		t.Fatalf("UpdateSiteGroup: %v", err)
+	}
+	if info := rm.GetRulesLayerInfo(); info.SiteGroupLayers["base"] != "override" {
+		t.Fatalf("edited group should be an override, got %q", info.SiteGroupLayers["base"])
+	}
+	if err := rm.UpdateSiteGroup(SiteGroup{ID: "base", Name: "base", Mode: "mitm", Domains: []string{"base.example"}, Enabled: true}); err != nil {
+		t.Fatalf("UpdateSiteGroup: %v", err)
+	}
+
+	if info := rm.GetRulesLayerInfo(); info.SiteGroupLayers["base"] != "upstream" {
+		t.Errorf("editing back to the upstream copy must clear the override, got %q", info.SiteGroupLayers["base"])
+	}
+
+	// The cleared state must survive a reload from disk.
+	rm2 := NewRuleManager(filepath.Join(dir, "settings.json"), rulesPath)
+	if err := rm2.LoadConfig(); err != nil {
+		t.Fatalf("reload LoadConfig: %v", err)
+	}
+	if info := rm2.GetRulesLayerInfo(); info.SiteGroupLayers["base"] != "upstream" {
+		t.Errorf("override must stay cleared after reload, got %q", info.SiteGroupLayers["base"])
+	}
+}
+
 // TestLayersRoundtripAfterSave proves that saving and reloading reproduce the
 // exact same effective state (no drift, no duplicated overrides).
 func TestLayersRoundtripAfterSave(t *testing.T) {
