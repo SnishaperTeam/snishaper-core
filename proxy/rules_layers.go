@@ -76,6 +76,7 @@ func (rm *RuleManager) userRulesPath() string {
 // effectiveRulesConfig snapshots the effective (merged) state.
 func (rm *RuleManager) effectiveRulesConfig() RulesConfig {
 	return RulesConfig{
+		ConfigVersion: CurrentConfigVersion,
 		SiteGroups:    rm.siteGroups,
 		Upstreams:     rm.upstreams,
 		DNSNodes:      rm.dnsNodes,

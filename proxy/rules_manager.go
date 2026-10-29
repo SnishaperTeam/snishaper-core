@@ -119,6 +119,9 @@ func (r *RuleManager) triggerConfigSaved() {
 
 // RulesConfig 是配置文件的完整 JSON 结构。
 type RulesConfig struct {
+	// ConfigVersion 显式配置模式版本（缺失 = 0，legacy）。由本构建在
+	// 保存时写为 CurrentConfigVersion；更高版本拒绝加载。
+	ConfigVersion int            `json:"config_version,omitempty"`
 	SiteGroups    []SiteGroup    `json:"site_groups"`
 	Upstreams     []Upstream     `json:"upstreams"`
 	DNSNodes      []DNSNode      `json:"dns_nodes,omitempty"`
@@ -355,12 +358,32 @@ func migrateLegacyECHRules(siteGroups []SiteGroup, profiles *[]ECHProfile) bool 
 
 // LoadConfig 从磁盘加载配置，文件缺失时使用默认值。
 func (rm *RuleManager) LoadConfig() error {
-	if err := rm.loadSettingsConfig(); err != nil {
+	report, err := rm.LoadConfigWithMigration()
+	if err != nil {
 		return err
 	}
-	if err := rm.loadRulesConfig(); err != nil {
-		return err
+	for _, c := range report.Changes {
+		rm.logf("[Config] migrated: %s", c)
 	}
+	for _, w := range report.Warnings {
+		rm.logf("[Config] warning: %s", w)
+	}
+	for _, e := range report.Errors {
+		rm.logf("[Config] error: %s", e)
+	}
+	return nil
+}
+
+// finishLoadConfig 运行加载后的归一化、修复与规则构建；迁移发现记入
+// report（可为 nil，仅内部旧路径使用）。
+func (rm *RuleManager) finishLoadConfig(report *MigrationReport) error {
+	if report == nil {
+		report = &MigrationReport{}
+	}
+
+	// 校验旧配置：移除的字段、非法值、冲突规则、不支持选项。必须先于
+	// 下面的归一化循环：校验器要把"原值 → 归一值"记入迁移报告。
+	rm.validateSiteGroups(report)
 
 	for i := range rm.siteGroups {
 		rm.siteGroups[i].DNSMode = normalizeDNSMode(rm.siteGroups[i].DNSMode)
@@ -378,13 +401,6 @@ func (rm *RuleManager) LoadConfig() error {
 		normalizeECHProfile(&rm.echProfiles[i])
 	}
 	rm.applySettingsDefaults()
-
-	// Sync Cloudflare Config if ProxyServer is linked
-	// Note: In current architecture, RuleManager doesn't have a back-pointer to ProxyServer.
-	// ProxyServer.SetRuleManager is used. We might need to update ProxyServer's pool elsewhere.
-	// But actually, ProxyServer holds the pool, so when LoadConfig is called via the RuleManager
-	// inside ProxyServer, it should be updated.
-	// Wait, ProxyServer has a pointer to RuleManager.
 
 	migrated := false
 	for i := range rm.siteGroups {
@@ -1166,7 +1182,8 @@ func (rm *RuleManager) saveSettingsConfig() error {
 	fragConfig := normalizeFragmentConfig(rm.fragConfig)
 
 	settings := SettingsConfig{
-		ListenPort: listenPort,
+		ConfigVersion: CurrentConfigVersion,
+		ListenPort:    listenPort,
 
 		CloseToTray:                   &closeToTray,
 		HibernateOnClose:              &hibernateOnClose,

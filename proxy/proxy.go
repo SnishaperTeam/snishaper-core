@@ -229,6 +229,9 @@ type ECHProfile struct {
 
 // SettingsConfig holds application-level settings.
 type SettingsConfig struct {
+	// ConfigVersion 显式配置模式版本（缺失 = 0，legacy），与 RulesConfig
+	// 的同名字段语义一致。
+	ConfigVersion                 int               `json:"config_version,omitempty"`
 	ListenPort                    string            `json:"listen_port"`
 	CloseToTray                   *bool             `json:"close_to_tray,omitempty"`
 	HibernateOnClose              *bool             `json:"hibernate_on_close,omitempty"`
