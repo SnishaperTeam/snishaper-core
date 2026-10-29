@@ -282,6 +282,10 @@ type Rule struct {
 	NAT64Enabled       bool             `json:"nat64_enabled"`
 	NAT64ProfileID     string           `json:"nat64_profile_id,omitempty"`
 	IPPool             string           `json:"ip_pool,omitempty"` // named pool: cloudfront or user-defined; takes precedence over UseCFPool
+	// Process restricts this rule to connections whose client process base
+	// name appears in this comma-separated list (e.g. "chrome.exe,msedge.exe").
+	// Process rules outrank domain-only rules; empty means "any process".
+	Process string `json:"process,omitempty"`
 	// Frag 是这条规则自己的分片参数（仅 tls-rf 模式使用），nil 表示跟随全局。
 	Frag *FragmentConfig `json:"frag,omitempty"`
 }
@@ -310,6 +314,9 @@ type SiteGroup struct {
 	NAT64Enabled       bool             `json:"nat64_enabled"`
 	NAT64ProfileID     string           `json:"nat64_profile_id,omitempty"`
 	IPPool             string           `json:"ip_pool,omitempty"`
+	// Process restricts this site group to connections from the listed client
+	// process base names (comma separated). See Rule.Process.
+	Process string `json:"process,omitempty"`
 	// Frag 是这个站点组自己的分片参数（仅 tls-rf 模式使用），nil 表示跟随全局。
 	Frag *FragmentConfig `json:"frag,omitempty"`
 }

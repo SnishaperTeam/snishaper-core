@@ -29,7 +29,7 @@ func newExplainRuleManager(t *testing.T) *RuleManager {
 func TestExplainMatchPrefersMoreSpecificRule(t *testing.T) {
 	rm := newExplainRuleManager(t)
 
-	expl := rm.ExplainMatch("a.example.com", "mitm")
+	expl := rm.ExplainMatch("a.example.com", "mitm", "")
 	if !expl.Simulated {
 		t.Fatal("explanation must be marked simulated")
 	}
@@ -50,7 +50,7 @@ func TestExplainMatchPrefersMoreSpecificRule(t *testing.T) {
 func TestExplainMatchSuffixFallback(t *testing.T) {
 	rm := newExplainRuleManager(t)
 
-	expl := rm.ExplainMatch("b.example.com", "mitm")
+	expl := rm.ExplainMatch("b.example.com", "mitm", "")
 	if expl.Source != "manual" || expl.SiteID != "g-general" || expl.Mode != "direct" {
 		t.Fatalf("expected general rule, got %+v", expl)
 	}
@@ -59,7 +59,7 @@ func TestExplainMatchSuffixFallback(t *testing.T) {
 func TestExplainMatchDefaultDirect(t *testing.T) {
 	rm := newExplainRuleManager(t)
 
-	expl := rm.ExplainMatch("nothing-here.invalid", "mitm")
+	expl := rm.ExplainMatch("nothing-here.invalid", "mitm", "")
 	if expl.Source != "default" || expl.Mode != "direct" {
 		t.Fatalf("expected default direct, got %+v", expl)
 	}
@@ -71,7 +71,7 @@ func TestExplainMatchDefaultDirect(t *testing.T) {
 func TestExplainMatchTransparentDowngradesMITM(t *testing.T) {
 	rm := newExplainRuleManager(t)
 
-	expl := rm.ExplainMatch("a.example.com", "transparent")
+	expl := rm.ExplainMatch("a.example.com", "transparent", "")
 	if !expl.Downgraded || expl.Mode != "direct" {
 		t.Fatalf("expected mitm rule downgraded to direct under transparent, got %+v", expl)
 	}
@@ -88,7 +88,7 @@ func TestExplainMatchDoesNotEmitRouteEvents(t *testing.T) {
 		events = append(events, domain+"/"+mode)
 	})
 
-	rm.ExplainMatch("a.example.com", "mitm")
+	rm.ExplainMatch("a.example.com", "mitm", "")
 	if len(events) != 0 {
 		t.Fatalf("simulated query emitted route events: %v", events)
 	}

@@ -134,21 +134,63 @@ func (r *RuleManager) SetRules(rules []Rule) {
 	r.rules = rules
 }
 
+// processNameInList reports whether the process base name appears in the
+// comma-separated rule process list. Comparison is case-insensitive.
+func processNameInList(process, list string) bool {
+	process = strings.ToLower(strings.TrimSpace(process))
+	if process == "" {
+		return false
+	}
+	for _, item := range strings.Split(list, ",") {
+		if strings.ToLower(strings.TrimSpace(item)) == process {
+			return true
+		}
+	}
+	return false
+}
+
+// HasProcessRules reports whether any enabled rule carries a process filter.
+// Callers use it to skip the process lookup cost when no rule needs it.
+func (r *RuleManager) HasProcessRules() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, rule := range r.rules {
+		if rule.Enabled && rule.Process != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // matchRule selects the best rule for host. routerDebug (WithRouterDebug)
 // enables per-request routing logs; it defaults to off to avoid log spam.
 func (r *RuleManager) matchRule(host, mode string) Rule {
-	rule, _, _ := r.matchRuleDetailed(host, mode, false, true)
+	rule, _, _ := r.matchRuleDetailed(host, mode, "", false, true)
 	return rule
 }
 
+// matchRuleFor is matchRule with a known client process for per-application
+// rules ("" when unknown — such rules then never match).
+func (r *RuleManager) matchRuleFor(host, mode, process string) Rule {
+	rule, _, _ := r.matchRuleDetailed(host, mode, process, false, true)
+	return rule
+}
+
+// processRuleBonus outranks every domain score class so per-application rules
+// always win over domain rules for their processes.
+const processRuleBonus = 1 << 20
+
 // matchRuleDetailed is the real matching pipeline. matchRule (real traffic)
 // and ExplainMatch (simulated queries) both land here so the explanation can
-// never drift from the engine. collect gathers every matching candidate with
-// its priority score; emit controls whether route events fire (simulated
-// queries must not pollute the live route feed).
-func (r *RuleManager) matchRuleDetailed(host, mode string, collect, emit bool) (Rule, []MatchCandidate, bool) {
+// never drift from the engine. process is the client process base name for
+// per-application rules ("" when unknown or unsupported — such rules then
+// never match). collect gathers every matching candidate with its priority
+// score; emit controls whether route events fire (simulated queries must not
+// pollute the live route feed).
+func (r *RuleManager) matchRuleDetailed(host, mode, process string, collect, emit bool) (Rule, []MatchCandidate, bool) {
 	host = normalizeHost(host)
 	mode = strings.ToLower(strings.TrimSpace(mode))
+	process = strings.ToLower(strings.TrimSpace(process))
 
 	// 手动规则匹配在锁内完成；命中所需的一切都先取本地副本再放锁：
 	// AutoRouter.Decide 可能触发 5s 的 DoH 查询，持锁等它会让规则写入方全部停摆。
@@ -162,13 +204,28 @@ func (r *RuleManager) matchRuleDetailed(host, mode string, collect, emit bool) (
 		}
 
 		score := domainMatchScore(host, rule.Domain, &r.domainRegexCache)
+		if rule.Process != "" {
+			// 进程规则：进程未知/不支持/不匹配时一律不参与（fail closed）。
+			// 进程规则的域名可为空（"*" 同义），表示该进程的所有目标。
+			if process == "" || !processNameInList(process, rule.Process) {
+				continue
+			}
+			if score < 0 && (rule.Domain == "" || rule.Domain == "*") {
+				score = 0
+			}
+			if score < 0 {
+				continue
+			}
+			score += processRuleBonus
+		}
 		if score >= 0 {
 			if collect {
 				candidates = append(candidates, MatchCandidate{
-					Domain: rule.Domain,
-					SiteID: rule.SiteID,
-					Mode:   rule.Mode,
-					Score:  score,
+					Domain:  rule.Domain,
+					SiteID:  rule.SiteID,
+					Mode:    rule.Mode,
+					Score:   score,
+					Process: rule.Process,
 				})
 			}
 			if score > bestScore {
@@ -591,7 +648,13 @@ func (rm *RuleManager) buildRules() {
 			}
 		}
 
-		for _, domain := range sg.Domains {
+		// 进程规则可以不带域名（任何目标）；空域名列表时合成一条
+		// Domain="*" 的规则，进程匹配即生效。
+		domains := sg.Domains
+		if len(domains) == 0 && strings.TrimSpace(sg.Process) != "" {
+			domains = []string{"*"}
+		}
+		for _, domain := range domains {
 			rule := Rule{
 				Domain:             domain,
 				Mode:               sg.Mode,
@@ -607,6 +670,7 @@ func (rm *RuleManager) buildRules() {
 				ECHProfileID:       sg.ECHProfileID,
 				UseCFPool:          sg.UseCFPool,
 			IPPool:             sg.IPPool,
+				Process:            strings.ToLower(strings.TrimSpace(sg.Process)),
 				ECHDiscoveryDomain: echProfile.DiscoveryDomain,
 				ECHDoHUpstream:     echProfile.DoHUpstream,
 				ECHAutoUpdate:      echProfile.AutoUpdate,

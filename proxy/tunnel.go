@@ -21,7 +21,7 @@ func (p *ProxyServer) handleRequest(w http.ResponseWriter, req *http.Request) {
 	}
 	matchHost := normalizeHost(host)
 	mode := p.GetMode()
-	rule := p.rules.matchRule(matchHost, mode)
+	rule := p.rules.matchRuleFor(matchHost, mode, p.clientProcess(req.RemoteAddr))
 
 	p.tracef("[Proxy] Request: %s -> %s (match: %s, runtime-mode: %s, rule-mode: %s)", req.Method, host, matchHost, mode, rule.Mode)
 

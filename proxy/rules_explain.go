@@ -11,10 +11,11 @@ import (
 // pattern length; the highest score wins, which is why a longer (more
 // specific) rule beats a more general one.
 type MatchCandidate struct {
-	Domain string `json:"domain"`
-	SiteID string `json:"site_id,omitempty"`
-	Mode   string `json:"mode"`
-	Score  int    `json:"score"`
+	Domain  string `json:"domain"`
+	SiteID  string `json:"site_id,omitempty"`
+	Mode    string `json:"mode"`
+	Process string `json:"process,omitempty"`
+	Score   int    `json:"score"`
 }
 
 // MatchExplanation is the simulated decision for a host, produced by the very
@@ -42,12 +43,13 @@ type MatchExplanation struct {
 const maxExplanationCandidates = 10
 
 // ExplainMatch explains how the rule engine would handle host under the given
-// global mode ("mitm", "transparent", ...). It reuses the real matching
-// pipeline — same scores, same auto-routing fallback, same MITM downgrade — so
-// the explanation cannot drift from the engine; it only skips route-event
-// emission to keep the live route feed free of simulated queries.
-func (rm *RuleManager) ExplainMatch(host, mode string) MatchExplanation {
-	rule, candidates, downgraded := rm.matchRuleDetailed(host, mode, true, false)
+// global mode ("mitm", "transparent", ...) from the given client process base
+// name ("" = unknown/any). It reuses the real matching pipeline — same scores,
+// same process-rule precedence, same auto-routing fallback, same MITM
+// downgrade — so the explanation cannot drift from the engine; it only skips
+// route-event emission to keep the live route feed free of simulated queries.
+func (rm *RuleManager) ExplainMatch(host, mode, process string) MatchExplanation {
+	rule, candidates, downgraded := rm.matchRuleDetailed(host, mode, process, true, false)
 
 	upstream := strings.TrimSpace(rule.Upstream)
 	if upstream == "" {

@@ -147,6 +147,18 @@ func ruleSource(rule Rule) string {
 	}
 }
 
+// clientProcess resolves the base name of the process behind a client
+// connection, but only when a per-application rule needs it: the TCP-table
+// scan costs real work per request, so without process rules it stays free.
+// Returns "" when unsupported, unknown or unnecessary — per-application rules
+// fail closed on "".
+func (p *ProxyServer) clientProcess(remoteAddr string) string {
+	if p.rules == nil || !p.rules.HasProcessRules() {
+		return ""
+	}
+	return findProcessName(remoteAddr)
+}
+
 // ActiveConnections returns a snapshot of the connections currently tracked by
 // the server, newest first. It is safe to call from any goroutine.
 func (p *ProxyServer) ActiveConnections() []ConnInfo {
