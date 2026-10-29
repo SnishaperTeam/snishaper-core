@@ -137,6 +137,16 @@ func (r *RuleManager) SetRules(rules []Rule) {
 // matchRule selects the best rule for host. routerDebug (WithRouterDebug)
 // enables per-request routing logs; it defaults to off to avoid log spam.
 func (r *RuleManager) matchRule(host, mode string) Rule {
+	rule, _, _ := r.matchRuleDetailed(host, mode, false, true)
+	return rule
+}
+
+// matchRuleDetailed is the real matching pipeline. matchRule (real traffic)
+// and ExplainMatch (simulated queries) both land here so the explanation can
+// never drift from the engine. collect gathers every matching candidate with
+// its priority score; emit controls whether route events fire (simulated
+// queries must not pollute the live route feed).
+func (r *RuleManager) matchRuleDetailed(host, mode string, collect, emit bool) (Rule, []MatchCandidate, bool) {
 	host = normalizeHost(host)
 	mode = strings.ToLower(strings.TrimSpace(mode))
 
@@ -145,15 +155,26 @@ func (r *RuleManager) matchRule(host, mode string) Rule {
 	r.mu.RLock()
 	best := Rule{}
 	bestScore := -1
+	var candidates []MatchCandidate
 	for _, rule := range r.rules {
 		if !rule.Enabled {
 			continue
 		}
 
 		score := domainMatchScore(host, rule.Domain, &r.domainRegexCache)
-		if score >= 0 && score > bestScore {
-			best = rule
-			bestScore = score
+		if score >= 0 {
+			if collect {
+				candidates = append(candidates, MatchCandidate{
+					Domain: rule.Domain,
+					SiteID: rule.SiteID,
+					Mode:   rule.Mode,
+					Score:  score,
+				})
+			}
+			if score > bestScore {
+				best = rule
+				bestScore = score
+			}
 		}
 	}
 	autoRouter := r.autoRouter
@@ -163,17 +184,21 @@ func (r *RuleManager) matchRule(host, mode string) Rule {
 
 	// 如果命中了特定规则
 	if bestScore >= 0 {
+		downgraded := false
 		if mode == "transparent" && best.Mode == "mitm" {
 			if routerDebug {
 				r.logf("[RuleMatch] Global Transparent detected: Downgrading MITM rule (%s) to DIRECT to avoid cert errors.", host)
 			}
 			best.Mode = "direct"
+			downgraded = true
 		}
 		if routerDebug {
 			r.logf("[Router] %s -> %s", host, best.Mode)
 		}
-		r.emitRouteEvent(host, best.Mode)
-		return best
+		if emit {
+			r.emitRouteEvent(host, best.Mode)
+		}
+		return best, candidates, downgraded
 	}
 
 	// 自动分流层：手动规则未命中时，查询 AutoRouter
@@ -183,8 +208,10 @@ func (r *RuleManager) matchRule(host, mode string) Rule {
 			if routerDebug {
 				r.logf("[Router] %s -> %s (AutoRoute)", host, autoRule.Mode)
 			}
-			r.emitRouteEvent(host, autoRule.Mode)
-			return autoRule
+			if emit {
+				r.emitRouteEvent(host, autoRule.Mode)
+			}
+			return autoRule, candidates, false
 		}
 	}
 
@@ -192,11 +219,13 @@ func (r *RuleManager) matchRule(host, mode string) Rule {
 	if r.routerDebug {
 		r.logf("[Router] %s -> direct (Default)", host)
 	}
-	r.emitRouteEvent(host, "direct")
+	if emit {
+		r.emitRouteEvent(host, "direct")
+	}
 	return Rule{
 		Mode:    "direct",
 		Enabled: true,
-	}
+	}, candidates, false
 }
 
 // NewRuleManager creates a RuleManager persisting settings to settingsPath and
