@@ -101,6 +101,10 @@ func (p *ProxyServer) handleSocks5Connect(ctx context.Context, writer io.Writer,
 
 	cr := p.prepareConnect(matchHost, targetAddr, rule)
 
+	// 连接查看器：包装客户端连接后，所有分支（direct/quic/mitm/tls-rf/
+	// transparent）都经由它统计流量并在关闭时注销登记。
+	clientConn = p.trackConn(clientConn, "socks5", matchHost, "", rule, cr.effectiveMode)
+
 	if cr.effectiveMode == "direct" {
 		if p.isSelfTarget(targetAddr) {
 			p.tracef("[SOCKS5] Rejected loopback request targeting proxy itself: %s", targetAddr)

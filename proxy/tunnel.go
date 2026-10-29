@@ -76,6 +76,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 		}
 		clientConn = wrapHijackedConn(clientConn, rw)
 		_ = clientConn.SetDeadline(time.Time{})
+		clientConn = p.trackConn(clientConn, "https", targetHost, "", cr.rule, cr.effectiveMode)
 		p.handleQUICMITM(clientConn, cr.targetHost, cr.rule)
 		return
 	}
@@ -93,6 +94,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 		}
 		clientConn = wrapHijackedConn(clientConn, rw)
 		_ = clientConn.SetDeadline(time.Time{})
+		clientConn = p.trackConn(clientConn, "https", targetHost, "", cr.rule, cr.effectiveMode)
 		_, targetPort, _ := net.SplitHostPort(cr.targetAddr)
 		if targetPort == "" {
 			targetPort = "443"
@@ -160,6 +162,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 	}
 	clientConn = wrapHijackedConn(clientConn, rw)
 	_ = clientConn.SetDeadline(time.Time{})
+	clientConn = p.trackConn(clientConn, "https", targetHost, cr.dialAddr, cr.rule, cr.effectiveMode)
 	if cr.conn != nil {
 		_ = cr.conn.SetDeadline(time.Time{})
 	}

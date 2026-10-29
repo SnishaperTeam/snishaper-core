@@ -373,6 +373,9 @@ type ProxyServer struct {
 	migrationCache         *migrationSessionCache
 	migrationCacheInitOnce sync.Once
 
+	// conns 注册当前隧道连接，供连接查看器快照使用；容量有界。
+	conns *connRegistry
+
 	tunMode     bool
 	ifaceConfig netiface.Config
 	// iface 是网卡选择器实例；原单仓实现用包级缓存，库化后随 ProxyServer 实例化。
@@ -490,6 +493,7 @@ func NewProxyServer(addr string, opts ...Option) *ProxyServer {
 		transport:  transport,
 		logger:     log.Nop,
 		iface:      netiface.NewSelector(),
+		conns:      newConnRegistry(),
 	}
 	applyProxyOptions(p, opts)
 
