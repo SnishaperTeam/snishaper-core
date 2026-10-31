@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -99,7 +100,7 @@ func TestMigrationFutureVersionRejected(t *testing.T) {
 	dir := t.TempDir()
 	future := CurrentConfigVersion + 1
 	rulesPath, settingsPath := seedConfigPair(t, dir,
-		`{"config_version":`+itoa(future)+`,"site_groups":[{"id":"g1","name":"one","mode":"direct","domains":["example.com"],"enabled":true,"website":"https://example.com"}],"upstreams":[]}`,
+		`{"config_version":`+strconv.Itoa(future)+`,"site_groups":[{"id":"g1","name":"one","mode":"direct","domains":["example.com"],"enabled":true,"website":"https://example.com"}],"upstreams":[]}`,
 		`{"listen_port":"8080"}`)
 
 	before, _ := os.ReadFile(rulesPath)
@@ -115,18 +116,6 @@ func TestMigrationFutureVersionRejected(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("rejected config must not be modified")
 	}
-}
-
-func itoa(v int) string {
-	if v == 0 {
-		return "0"
-	}
-	digits := ""
-	for v > 0 {
-		digits = string(rune('0'+v%10)) + digits
-		v /= 10
-	}
-	return digits
 }
 
 // TestMigrationInvalidModeDisablesGroup: 未知模式不能猜测语义——禁用该组

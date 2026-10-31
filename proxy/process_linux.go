@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"encoding/binary"
 	"net"
 	"os"
 	"path/filepath"
@@ -63,14 +64,32 @@ func lookupProcSocketInode(remote *net.TCPAddr) (string, error) {
 }
 
 // procHexAddr renders ip:port in the hexadecimal form used by /proc/net/tcp*:
-// network-order bytes as hex, port as 4 hex digits.
+// the kernel prints the address as native-order u32 words in uppercase hex
+// (each 4-byte group byte-swapped on little-endian hosts, e.g. 127.0.0.1 ->
+// 0100007F) and the port as 4 uppercase hex digits.
 func procHexAddr(ip net.IP, port int) string {
+	portHex := strings.ToUpper(strconv.FormatInt(int64(port), 16))
 	if v4 := ip.To4(); v4 != nil {
-		return hexEncode(v4) + ":" + strconv.FormatInt(int64(port), 16)
+		return hexEncode(nativeOrderWords(v4)) + ":" + portHex
 	}
-	v6 := ip.To16()
-	// /proc/net/tcp6 stores 4 network-order u32 words.
-	return hexEncode(v6) + ":" + strconv.FormatInt(int64(port), 16)
+	return hexEncode(nativeOrderWords(ip.To16())) + ":" + portHex
+}
+
+// littleEndian reports the host byte order; /proc/net/tcp* prints u32 words
+// in host order, so only little-endian hosts need the swap.
+var littleEndian = binary.NativeEndian.Uint16([]byte{0x01, 0x00}) == 0x0001
+
+// nativeOrderWords byte-swaps every 4-byte word on little-endian hosts,
+// matching the address form the kernel prints in /proc/net/tcp*.
+func nativeOrderWords(b []byte) []byte {
+	if !littleEndian {
+		return b
+	}
+	out := make([]byte, len(b))
+	for i := 0; i+4 <= len(b); i += 4 {
+		out[i], out[i+1], out[i+2], out[i+3] = b[i+3], b[i+2], b[i+1], b[i]
+	}
+	return out
 }
 
 func hexEncode(b []byte) string {
