@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"net"
 	"strings"
 	"testing"
@@ -49,7 +50,7 @@ func TestDialUpstreamDoHFallbackAfterDeadUpstream(t *testing.T) {
 		},
 	}
 
-	if err := p.dialUpstream(cr); err != nil {
+	if err := p.dialUpstream(context.Background(), cr); err != nil {
 		t.Fatalf("dialUpstream should succeed via DoH fallback, got: %v", err)
 	}
 	if cr.conn == nil {
@@ -72,7 +73,7 @@ func TestBuildDoHFallbackCandidatesExcludesTried(t *testing.T) {
 		rule:          Rule{Mode: "direct", Enabled: true, DNSMode: "system"},
 	}
 	tried := []string{net.JoinHostPort("127.0.0.1", port)}
-	fallback := p.buildDoHFallbackCandidates(cr, tried)
+	fallback := p.buildDoHFallbackCandidates(context.Background(), cr, tried)
 	for _, addr := range fallback {
 		if addr == tried[0] {
 			t.Fatalf("fallback re-tries already-failed candidate %s: %v", addr, fallback)
@@ -91,7 +92,7 @@ func TestDialUpstreamNoFallbackForLiteralTarget(t *testing.T) {
 		targetAddr:    net.JoinHostPort("127.0.0.1", "1"),
 		rule:          Rule{Mode: "direct", Enabled: true},
 	}
-	err := p.dialUpstream(cr)
+	err := p.dialUpstream(context.Background(), cr)
 	if err == nil {
 		t.Fatal("expected dial error for dead literal target")
 	}

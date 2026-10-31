@@ -348,7 +348,7 @@ func (p *ProxyServer) handleMigration(clientConn net.Conn, host, port string, ru
 func (p *ProxyServer) migrationFallbackDial(clientConn net.Conn, host, port string, rule Rule) {
 	targetAddr := net.JoinHostPort(host, port)
 	cr := p.prepareConnect(host, targetAddr, rule)
-	if err := p.dialUpstream(cr); err != nil {
+	if err := p.dialUpstream(context.Background(), cr); err != nil {
 		_, _ = clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\nUpstream connect failed"))
 		clientConn.Close()
 		return

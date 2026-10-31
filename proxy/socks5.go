@@ -170,14 +170,14 @@ func (p *ProxyServer) handleSocks5Connect(ctx context.Context, writer io.Writer,
 			return err
 		}
 		if !cr.tunnelled {
-			if err := p.resolveDialCandidates(cr); err != nil {
+			if err := p.resolveDialCandidates(ctx, cr); err != nil {
 				p.tracef("[SOCKS5] failed to resolve upstream candidates: %v", err)
 				socks5.SendReply(writer, statute.RepHostUnreachable, req.LocalAddr)
 				return err
 			}
 		}
 	} else {
-		if err := p.dialUpstream(cr); err != nil {
+		if err := p.dialUpstream(ctx, cr); err != nil {
 			p.tracef("[SOCKS5] upstream connect failed: %v", err)
 			socks5.SendReply(writer, statute.RepHostUnreachable, req.LocalAddr)
 			return err

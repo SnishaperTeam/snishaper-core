@@ -289,7 +289,7 @@ func (p *ProxyServer) dialSubscriptionTunnel(cr *connectResult) (bool, error) {
 // resolveDialCandidates 只解析上游候选地址，不建立到上游的连接。
 // handleMITM 需要候选地址即可：上游 ALPN 必须按客户端宣告的协议来定，连接只能在
 // TLS 握手回调里由 establishUpstreamConn 建立，因此它用不到也不该拿到 cr.conn。
-func (p *ProxyServer) resolveDialCandidates(cr *connectResult) error {
+func (p *ProxyServer) resolveDialCandidates(ctx context.Context, cr *connectResult) error {
 	_, port, _ := net.SplitHostPort(cr.targetAddr)
 	if port == "" {
 		port = "443"
@@ -314,7 +314,7 @@ func (p *ProxyServer) resolveDialCandidates(cr *connectResult) error {
 		}
 	}
 
-	dialCandidates := p.buildDialCandidates(context.Background(), cr.targetHost, cr.targetAddr, cr.rule, cr.effectiveMode)
+	dialCandidates := p.buildDialCandidates(ctx, cr.targetHost, cr.targetAddr, cr.rule, cr.effectiveMode)
 	if len(dialCandidates) == 0 {
 		// 规则带有硬性地址族约束（ipv6_only / NAT64）而本机无 IPv6：以明确错误
 		// 失败，不要用 targetAddr 兜底 —— 那会静默走 IPv4 并掩盖配置不匹配。
@@ -361,12 +361,17 @@ func (p *ProxyServer) resolveDialCandidates(cr *connectResult) error {
 // dialSerial 按顺序串行拨号候选列表，返回第一个成功的连接及其地址。
 // 全部失败时汇总每个候选的错误返回（超时候选即 i/o timeout），调用方
 // 拿到的错误要能看出每个候选分别是怎么失败的。
-func (p *ProxyServer) dialSerial(rule Rule, candidates []string) (net.Conn, string, error) {
+// ctx 取消（客户端已断开）时立即终止，不为已放弃的连接继续逐个
+// 消耗 10s 拨号超时 —— 这是 goroutine 堆积 OOM（issue #181）的主路径。
+func (p *ProxyServer) dialSerial(ctx context.Context, rule Rule, candidates []string) (net.Conn, string, error) {
 	var errs []error
 	for _, addr := range candidates {
-		conn, err := p.dialWithRule(context.Background(), "tcp", addr, rule)
+		conn, err := p.dialWithRule(ctx, "tcp", addr, rule)
 		if err == nil {
 			return conn, addr, nil
+		}
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
 		}
 		if pool := p.poolForRule(rule); pool != nil {
 			if h, _, splitErr := net.SplitHostPort(addr); splitErr == nil && h != "" {
@@ -391,7 +396,7 @@ func (p *ProxyServer) dialSerial(rule Rule, candidates []string) (net.Conn, stri
 // 地址（Fastly anycast 等）仍然可用。目标本身就是字面 IP 时没有可回退的解析，
 // DoH 也没有给出可用 IP 时同样返回 nil —— 此时绝不能退回系统解析：TUN 模式下
 // 系统 DNS 会被劫持成 fake-ip，拿它拨号必然失败，只会把错误拖成超时。
-func (p *ProxyServer) buildDoHFallbackCandidates(cr *connectResult, tried []string) []string {
+func (p *ProxyServer) buildDoHFallbackCandidates(ctx context.Context, cr *connectResult, tried []string) []string {
 	host := normalizeHost(cr.targetHost)
 	if host == "" || isLiteralIP(host) {
 		return nil
@@ -401,7 +406,7 @@ func (p *ProxyServer) buildDoHFallbackCandidates(cr *connectResult, tried []stri
 		port = "443"
 	}
 
-	resolved := p.resolveDomainCandidates(context.Background(), host, port, cr.rule.DNSMode)
+	resolved := p.resolveDomainCandidates(ctx, host, port, cr.rule.DNSMode)
 	triedSet := make(map[string]struct{}, len(tried))
 	for _, addr := range tried {
 		triedSet[strings.TrimSpace(addr)] = struct{}{}
@@ -430,7 +435,7 @@ func (p *ProxyServer) buildDoHFallbackCandidates(cr *connectResult, tried []stri
 // 主候选失败后有一次 DoH 回退：规则 upstream 常是硬编码 IP，可能整体失效
 // （换 CDN、IP 被封），而目标域名本身仍可经 DoH 解析出可达地址。回退仍失败
 // 时把最终（通常是拨号超时）错误原样返回，由调用方决定对客户端的响应。
-func (p *ProxyServer) dialUpstream(cr *connectResult) error {
+func (p *ProxyServer) dialUpstream(ctx context.Context, cr *connectResult) error {
 	// IP 池路径保留 DialParallel 的整池竞速：这条路径的调用方不做二次竞速，
 	// 换成串行拨号会明显拉长建连时间。
 	if pool := p.poolForRule(cr.rule); ipPoolUsable(pool) {
@@ -442,7 +447,7 @@ func (p *ProxyServer) dialUpstream(cr *connectResult) error {
 		if cr.rule.NAT64Enabled && cr.rule.NAT64ProfileID != "" {
 			prefix = p.rules.GetNAT64PrefixByID(cr.rule.NAT64ProfileID)
 		}
-		conn, dialedAddr, err := pool.DialParallel(context.Background(), "tcp", port, prefix)
+		conn, dialedAddr, err := pool.DialParallel(ctx, "tcp", port, prefix)
 		if err == nil {
 			cr.dialCandidates = []string{dialedAddr}
 			cr.dialAddr = dialedAddr
@@ -459,19 +464,24 @@ func (p *ProxyServer) dialUpstream(cr *connectResult) error {
 		return err
 	}
 
-	if err := p.resolveDialCandidates(cr); err != nil {
+	if err := p.resolveDialCandidates(ctx, cr); err != nil {
 		return err
 	}
 
-	conn, dialedAddr, err := p.dialSerial(cr.rule, cr.dialCandidates)
+	conn, dialedAddr, err := p.dialSerial(ctx, cr.rule, cr.dialCandidates)
 	if err != nil {
-		fallback := p.buildDoHFallbackCandidates(cr, cr.dialCandidates)
+		// 客户端已断开时不再做 DoH 回退解析 —— 那会为已放弃的连接
+		// 再扇出一轮 DNS 查询，正是 goroutine 堆积（issue #181）的放大器。
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		fallback := p.buildDoHFallbackCandidates(ctx, cr, cr.dialCandidates)
 		if len(fallback) == 0 {
 			return err
 		}
 		p.tracef("[Connect] All %d primary candidates failed for %s (%v), retrying via DoH fallback %v",
 			len(cr.dialCandidates), cr.targetHost, err, fallback)
-		conn, dialedAddr, err = p.dialSerial(cr.rule, fallback)
+		conn, dialedAddr, err = p.dialSerial(ctx, cr.rule, fallback)
 		if err != nil {
 			return fmt.Errorf("primary candidates failed; DoH fallback also failed: %w", err)
 		}

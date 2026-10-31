@@ -112,7 +112,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 			return
 		}
 		if !cr.tunnelled {
-			if err := p.resolveDialCandidates(cr); err != nil {
+			if err := p.resolveDialCandidates(req.Context(), cr); err != nil {
 				p.tracef("[Connect] 502 (local): CONNECT %s mode=mitm rule-mode=%s upstream=%s error=%v",
 					targetAuthority, rule.Mode, rule.Upstream, err)
 				http.Error(w, "Failed to connect to upstream", http.StatusBadGateway)
@@ -120,7 +120,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 				return
 			}
 		}
-	} else if err := p.dialUpstream(cr); err != nil {
+	} else if err := p.dialUpstream(req.Context(), cr); err != nil {
 		p.tracef("[Connect] 502 (local): CONNECT %s mode=%s rule-mode=%s upstream=%s candidates=%v error=%v",
 			targetAuthority, cr.effectiveMode, rule.Mode, rule.Upstream, cr.dialCandidates, err)
 		http.Error(w, "Failed to connect to upstream", http.StatusBadGateway)

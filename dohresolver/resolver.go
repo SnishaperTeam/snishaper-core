@@ -72,6 +72,17 @@ type dnsCacheEntry struct {
 // nodeClientIdleTimeout 是复用的 DoH 传输层保留空闲连接的时间。
 const nodeClientIdleTimeout = 90 * time.Second
 
+// negativeCacheTTL 是解析失败结果的负缓存时长：足够吸收客户端的密集重试，
+// 又能在网络恢复/节点恢复后很快重试真实解析。
+const negativeCacheTTL = 15 * time.Second
+
+// resolveCall 是 singleflight 一次域名解析的共享结果载体。
+type resolveCall struct {
+	done chan struct{}
+	ips  []string
+	err  error
+}
+
 // maxCachedNodeClients 限制缓存的 DoH 客户端数量：节点配置变化（URL/SNI/IP/证书校验策略）
 // 或 QUIC 节点 ECH 配置热更新时会产生新条目，超限时按最久未使用淘汰并关闭。
 const maxCachedNodeClients = 16
@@ -97,6 +108,16 @@ type FailoverResolver struct {
 	// 过期-but-fresh 缓存的并发请求只触发一次后台 DoH 解析。
 	refreshMu       sync.Mutex
 	refreshInflight map[string]struct{}
+
+	// negCache 记录最近解析失败的域名（domain -> 失败失效时间）。
+	// 死域名（广告/遥测）的重试风暴曾把每次失败都重新放大成 2 查询 × N 节点
+	// 的并发 DoH 扇出，goroutine 无限堆积直至 OOM（SniShaper issue #181）。
+	// 失败短时负缓存让后续重试立即失败，扇出只发生一次。
+	negCache sync.Map
+
+	// resolveInflight 实现并发解析 singleflight（domain -> *resolveCall）：
+	// 同一域名的并发 ResolveIPs 只有一个真正发起 DoH 查询，其余等待其结果。
+	resolveInflight sync.Map
 
 	clientMu    sync.Mutex             // 保护 clients
 	clients     map[string]*nodeClient // node 配置指纹 -> 复用中的 DoH 客户端
@@ -628,6 +649,15 @@ func (r *FailoverResolver) TestNode(ctx context.Context, node DNSNode) ([]string
 
 // ResolveIPs 解析域名并返回 IP 字符串列表。
 func (r *FailoverResolver) ResolveIPs(ctx context.Context, domain string) ([]string, error) {
+	// 负缓存命中：该域名最近解析失败，立即返回错误。这是重试风暴下的
+	// 第一道闸门 —— 不查缓存的话，每个并发调用都会重新扇出完整 DoH 查询。
+	if v, ok := r.negCache.Load(domain); ok {
+		if expiry, valid := v.(time.Time); valid && time.Now().Before(expiry) {
+			return nil, fmt.Errorf("DNS resolution for %s failed recently (negative cache)", domain)
+		}
+		r.negCache.Delete(domain)
+	}
+
 	now := time.Now()
 
 	if val, ok := r.dnsCache.Load(domain); ok {
@@ -658,7 +688,37 @@ func (r *FailoverResolver) ResolveIPs(ctx context.Context, domain string) ([]str
 		}
 	}
 
-	return r.resolveAndCache(ctx, domain)
+	ips, err := r.resolveSingleflight(ctx, domain)
+	if err != nil {
+		// 只缓存真实失败。调用方被取消（客户端已断开）或结果本身是取消错误时
+		// 不进负缓存 —— 否则一次断开会把该域名对所有调用方错误地封死 15s。
+		if ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+			r.negCache.Store(domain, time.Now().Add(negativeCacheTTL))
+		}
+		return nil, err
+	}
+	return ips, nil
+}
+
+// resolveSingleflight 保证同一域名同一时刻只有一个真实解析在执行，
+// 后到的并发调用等待并复用其结果，而不是各自扇出一份 DoH 查询。
+func (r *FailoverResolver) resolveSingleflight(ctx context.Context, domain string) ([]string, error) {
+	call := &resolveCall{done: make(chan struct{})}
+	if actual, loaded := r.resolveInflight.LoadOrStore(domain, call); loaded {
+		existing := actual.(*resolveCall)
+		select {
+		case <-existing.done:
+			return existing.ips, existing.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	defer func() {
+		r.resolveInflight.Delete(domain)
+		close(call.done)
+	}()
+	call.ips, call.err = r.resolveAndCache(ctx, domain)
+	return call.ips, call.err
 }
 
 func (r *FailoverResolver) resolveAndCache(ctx context.Context, domain string) ([]string, error) {
