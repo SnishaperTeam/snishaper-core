@@ -124,8 +124,8 @@ func unknownTopLevelKeys(raw map[string]json.RawMessage, label string) []string 
 		// settings config
 		"listen_port": true, "close_to_tray": true, "hibernate_on_close": true,
 		"auto_start": true, "show_main_window_on_auto_start": true,
-		"auto_enable_proxy_on_auto_start": true, "auto_enable_sys_proxy_on_auto_start": true,
-		"auto_update_rules": true, "cloudflare": true, "auto_routing": true,
+		"auto_enable_proxy_on_auto_start": true, "auto_enable_sysproxy_on_auto_start": true,
+		"auto_update_rules": true, "cloudflare_config": true, "auto_routing": true,
 		"tun": true, "fragment": true, "language": true, "theme": true,
 		"appearance_mode": true, "migration_enabled": true, "migration_server": true,
 		"update_channel": true, "download_source": true, "custom_download_source": true,
