@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/SnishaperTeam/snishaper-core/config"
+	"github.com/SnishaperTeam/snishaper-core/internal/atomicfile"
 	"github.com/SnishaperTeam/snishaper-core/internal/openutil"
 )
 
@@ -138,14 +139,10 @@ func (cm *CertManager) GenerateCA() error {
 	return cm.generateCAUnlocked()
 }
 
-// writeFileAtomic writes data through a temp file + rename so a crash or power
-// loss mid-write never leaves a truncated file behind.
+// writeFileAtomic writes data through a uniquely named temp file plus rename so
+// a crash or a concurrent writer never leaves a truncated file behind.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, data, perm)
 }
 
 func (cm *CertManager) saveCA() error {
@@ -202,15 +199,6 @@ func (cm *CertManager) LoadCA() error {
 // GetCACertPath returns the file path of the CA certificate.
 func (cm *CertManager) GetCACertPath() string {
 	return cm.caPath
-}
-
-// GetCertPool returns a new x509 pool containing the loaded CA certificate.
-func (cm *CertManager) GetCertPool() *x509.CertPool {
-	pool := x509.NewCertPool()
-	if cm.caCert != nil {
-		pool.AddCert(cm.caCert)
-	}
-	return pool
 }
 
 // GetCACert returns the loaded CA certificate, or nil if not loaded.

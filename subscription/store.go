@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/SnishaperTeam/snishaper-core/config"
+	"github.com/SnishaperTeam/snishaper-core/internal/atomicfile"
 )
 
 // DefaultSubscriptionID is the built-in entry that keeps the shipped rules and
@@ -56,6 +57,8 @@ type Store struct {
 	activeID   string
 	logf       func(string)
 	fetchProxy string
+	// scope owns the pooled tunnels dialed through this store's nodes.
+	scope *dialerScope
 	// brand 决定拉取订阅时携带的产品 User-Agent。
 	brand config.Brand
 }
@@ -122,7 +125,7 @@ type storeFile struct {
 // the reference product's name.
 func NewStore(path string, logf func(string), opts ...Option) *Store {
 	o := applyOptions(opts)
-	s := &Store{path: path, logf: logf, activeID: DefaultSubscriptionID, brand: o.brand}
+	s := &Store{path: path, logf: logf, activeID: DefaultSubscriptionID, brand: o.brand, scope: &dialerScope{}}
 	s.entries = []*Entry{builtinDefaultEntry()}
 	if err := s.load(); err != nil && logf != nil {
 		logf(fmt.Sprintf("[Subscription] load failed: %v", err))
@@ -218,15 +221,10 @@ func (s *Store) Reload() error {
 	return nil
 }
 
-// writeFileAtomic writes data to path through a temp file and a rename, so a
-// crash mid-write can never truncate the previous file: readers see either the
-// old content or the new content, never a partial write.
+// writeFileAtomic writes data to path through a uniquely named temp file and a
+// rename, so a crash or a second writer can never truncate the previous file.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, data, perm)
 }
 
 func (s *Store) saveLocked() error {
@@ -257,12 +255,16 @@ func (s *Store) find(id string) *Entry {
 	return nil
 }
 
-// List returns all subscriptions with the built-in entry first.
+// List returns all subscriptions with the built-in entry first. The returned
+// entries are copies: Update and Add mutate the live entries concurrently, so
+// handing out the pointers would race with the next refresh.
 func (s *Store) List() []*Entry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]*Entry, 0, len(s.entries))
-	out = append(out, s.entries...)
+	for _, e := range s.entries {
+		out = append(out, s.cloneEntryLocked(e))
+	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Builtin != out[j].Builtin {
 			return out[i].Builtin
@@ -279,11 +281,35 @@ func (s *Store) ActiveID() string {
 	return s.activeID
 }
 
-// Get returns a subscription by id.
+// Get returns a copy of a subscription by id.
 func (s *Store) Get(id string) *Entry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.find(id)
+	entry := s.find(id)
+	if entry == nil {
+		return nil
+	}
+	return s.cloneEntryLocked(entry)
+}
+
+// cloneEntryLocked deep-copies the slices a caller can read while a refresh
+// replaces them. Callers must hold s.mu.
+func (s *Store) cloneEntryLocked(entry *Entry) *Entry {
+	cloned := *entry
+	cloned.Selection = make(map[string]string, len(entry.Selection))
+	for k, v := range entry.Selection {
+		cloned.Selection[k] = v
+	}
+	cloned.Nodes = append([]Node(nil), entry.Nodes...)
+	cloned.Groups = append([]Group(nil), entry.Groups...)
+	cloned.SiteGroups = append([]SiteGroup(nil), entry.SiteGroups...)
+	return &cloned
+}
+
+// ReleaseWireguardDialers closes the WireGuard tunnels this store dialed,
+// leaving tunnels belonging to other stores in the process alone.
+func (s *Store) ReleaseWireguardDialers() {
+	releaseWireguardDialer(s.scope)
 }
 
 // SetActive selects the active subscription. Selecting the built-in entry
@@ -503,7 +529,7 @@ func (s *Store) ActiveSiteGroups() []SiteGroup {
 	if entry == nil || entry.Builtin {
 		return nil
 	}
-	return entry.SiteGroups
+	return append([]SiteGroup(nil), entry.SiteGroups...)
 }
 
 // ActiveEntry returns a snapshot of the active subscription. The copy is made
@@ -517,16 +543,7 @@ func (s *Store) ActiveEntry() *Entry {
 	if entry == nil {
 		return nil
 	}
-
-	cloned := *entry
-	cloned.Selection = make(map[string]string, len(entry.Selection))
-	for k, v := range entry.Selection {
-		cloned.Selection[k] = v
-	}
-	cloned.Nodes = append([]Node(nil), entry.Nodes...)
-	cloned.Groups = append([]Group(nil), entry.Groups...)
-	cloned.SiteGroups = append([]SiteGroup(nil), entry.SiteGroups...)
-	return &cloned
+	return s.cloneEntryLocked(entry)
 }
 
 // ActiveNode returns the node selected for the first group that carries a
@@ -548,6 +565,7 @@ func (s *Store) ActiveNode() (Node, bool) {
 		}
 		for _, n := range entry.Nodes {
 			if n.Name == selected && n.Supported() {
+				n.scope = s.scope
 				return n, true
 			}
 		}
@@ -566,6 +584,7 @@ func (s *Store) NodeByID(subscriptionID, nodeName string) (Node, bool) {
 	}
 	for _, n := range entry.Nodes {
 		if n.Name == nodeName && n.Supported() {
+			n.scope = s.scope
 			return n, true
 		}
 	}

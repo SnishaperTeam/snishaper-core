@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/SnishaperTeam/snishaper-core/config"
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
+	"github.com/SnishaperTeam/snishaper-core/internal/atomicfile"
 	"github.com/SnishaperTeam/snishaper-core/log"
 	"github.com/SnishaperTeam/snishaper-core/subscription"
 )
@@ -54,6 +54,7 @@ type RuleManager struct {
 	customDownloadSource string
 	rulesHashMu          sync.Mutex
 	rulesHash            string
+	saveMu               sync.Mutex
 	logger               log.Logger
 	routerDebug          bool
 	// brand 标识嵌入方产品名，决定 TUN 网卡默认名等用户可见标识。
@@ -102,19 +103,32 @@ func (r *RuleManager) logf(format string, args ...any) {
 }
 
 // triggerConfigSaved fires the config-saved callback asynchronously.
-// It is always called from methods that already hold rm.mu, so no extra locking is needed.
+// Callers must hold rm.mu; triggerConfigSaved takes the read lock itself.
 func (r *RuleManager) triggerConfigSaved() {
+	r.mu.RLock()
 	cb := r.onConfigSaved
-	if cb != nil {
-		go func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					r.logf("[Config] panic in onConfigSaved callback: %v", rec)
-				}
-			}()
-			cb()
-		}()
+	r.mu.RUnlock()
+	r.fireConfigSaved(cb)
+}
+
+// triggerConfigSavedLocked is triggerConfigSaved for callers that already hold
+// rm.mu (read or write): it reads the callback without re-locking the mutex.
+func (r *RuleManager) triggerConfigSavedLocked() {
+	r.fireConfigSaved(r.onConfigSaved)
+}
+
+func (r *RuleManager) fireConfigSaved(cb func()) {
+	if cb == nil {
+		return
 	}
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				r.logf("[Config] panic in onConfigSaved callback: %v", rec)
+			}
+		}()
+		cb()
+	}()
 }
 
 // RulesConfig 是配置文件的完整 JSON 结构。
@@ -419,7 +433,10 @@ func (rm *RuleManager) finishLoadConfig(report *MigrationReport) error {
 	// 要从这里恢复出厂 siteGroups。
 	rm.snapshotBuiltinSiteGroups()
 	if migrated {
-		if err := rm.saveRulesConfig(); err != nil {
+		rm.mu.RLock()
+		err := rm.saveRulesConfig()
+		rm.mu.RUnlock()
+		if err != nil {
 			rm.logf("[Config] migrate website field failed: %v", err)
 		} else {
 			rm.logf("[Config] migrated website field for existing site groups")
@@ -581,12 +598,13 @@ func (rm *RuleManager) loadRulesConfig() error {
 	rm.updateRulesFileHash()
 	// Ensure at least the default Ali DoH bootstrap node exists
 	if len(rm.dnsNodes) == 0 {
-		rm.dnsNodes = defaultDNSNodes()
+		rm.dnsNodes = []DNSNode{}
 	}
 	return nil
 }
 
 func (rm *RuleManager) saveDefaultSettingsConfig() error {
+	rm.mu.Lock()
 	rm.closeToTray = true
 	rm.autoStart = false
 	rm.showMainOnAutoStart = true
@@ -594,17 +612,18 @@ func (rm *RuleManager) saveDefaultSettingsConfig() error {
 	rm.autoEnableSysProxyOnAutoStart = true
 	rm.autoUpdateRules = true
 	rm.applySettingsDefaults()
+	rm.mu.Unlock()
 	return rm.saveSettingsConfig()
 }
 
 func (rm *RuleManager) saveDefaultRulesConfig() error {
 	rm.siteGroups = []SiteGroup{}
 	rm.upstreams = []Upstream{}
-	rm.dnsNodes = defaultDNSNodes()
+	rm.dnsNodes = []DNSNode{}
 	rm.echProfiles = []ECHProfile{}
 	rm.nat64Profiles = []NAT64Profile{}
 	// 全新安装：空有效状态 + 等值备份，保证求差结果为空。
-	rm.upstreamRules = RulesConfig{DNSNodes: defaultDNSNodes()}
+	rm.upstreamRules = RulesConfig{DNSNodes: []DNSNode{}}
 	rm.buildRules()
 	if err := rm.saveUpstreamRulesConfig(); err != nil {
 		return err
@@ -685,7 +704,7 @@ func (rm *RuleManager) buildRules() {
 				ECHEnabled:         sg.ECHEnabled,
 				ECHProfileID:       sg.ECHProfileID,
 				UseCFPool:          sg.UseCFPool,
-			IPPool:             sg.IPPool,
+				IPPool:             sg.IPPool,
 				Process:            strings.ToLower(strings.TrimSpace(sg.Process)),
 				ECHDiscoveryDomain: echProfile.DiscoveryDomain,
 				ECHDoHUpstream:     echProfile.DoHUpstream,
@@ -704,7 +723,9 @@ func (rm *RuleManager) buildRules() {
 func (rm *RuleManager) GetSiteGroups() []SiteGroup {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	return rm.siteGroups
+	out := make([]SiteGroup, len(rm.siteGroups))
+	copy(out, rm.siteGroups)
+	return out
 }
 
 // GetListenPort 返回本地监听端口。
@@ -723,11 +744,11 @@ func (rm *RuleManager) SetListenPort(port string) {
 
 // SaveConfig 将当前配置写回磁盘。
 func (rm *RuleManager) SaveConfig() error {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
 	if err := rm.saveSettingsConfig(); err != nil {
 		return err
 	}
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
 	return rm.saveRulesConfig()
 }
 
@@ -1037,7 +1058,9 @@ func (rm *RuleManager) DeleteSiteGroup(id string) error {
 func (rm *RuleManager) GetUpstreams() []Upstream {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	return rm.upstreams
+	out := make([]Upstream, len(rm.upstreams))
+	copy(out, rm.upstreams)
+	return out
 }
 
 // AddUpstream 新增一个上游。
@@ -1163,7 +1186,9 @@ func (rm *RuleManager) SetDNSNodePriority(id string, targetIndex int) error {
 	return rm.saveRulesConfig()
 }
 
-func (rm *RuleManager) saveSettingsConfig() error {
+// settingsSnapshot copies every persisted setting. The caller must hold rm.mu
+// (read or write) so a concurrent setter cannot produce a half-updated file.
+func (rm *RuleManager) settingsSnapshot() SettingsConfig {
 	listenPort := rm.listenPort
 	if listenPort == "" {
 		listenPort = "8080"
@@ -1176,12 +1201,8 @@ func (rm *RuleManager) saveSettingsConfig() error {
 	autoEnableSysProxyOnAutoStart := rm.autoEnableSysProxyOnAutoStart
 	autoUpdateRules := rm.autoUpdateRules
 	migrationEnabled := rm.migrationEnabled
-	cloudflareConfig := rm.cloudflareConfig
-	ipPoolConfigs := rm.ipPoolConfigs
-	tunConfig := normalizeTUNConfig(rm.tunConfig, rm.brand)
-	fragConfig := normalizeFragmentConfig(rm.fragConfig)
 
-	settings := SettingsConfig{
+	return SettingsConfig{
 		ConfigVersion: CurrentConfigVersion,
 		ListenPort:    listenPort,
 
@@ -1192,11 +1213,11 @@ func (rm *RuleManager) saveSettingsConfig() error {
 		AutoEnableProxyOnAutoStart:    &autoEnableProxyOnAutoStart,
 		AutoEnableSysProxyOnAutoStart: &autoEnableSysProxyOnAutoStart,
 		AutoUpdateRules:               &autoUpdateRules,
-		CloudflareConfig:              cloudflareConfig,
-		IPPools:                       ipPoolConfigs,
+		CloudflareConfig:              rm.cloudflareConfig,
+		IPPools:                       rm.ipPoolConfigs,
 		AutoRouting:                   rm.autoRoutingConfig,
-		TUN:                           tunConfig,
-		Fragment:                      fragConfig,
+		TUN:                           normalizeTUNConfig(rm.tunConfig, rm.brand),
+		Fragment:                      normalizeFragmentConfig(rm.fragConfig),
 		Language:                      rm.language,
 		Theme:                         rm.theme,
 		AppearanceMode:                rm.appearanceMode,
@@ -1207,29 +1228,33 @@ func (rm *RuleManager) saveSettingsConfig() error {
 		DownloadSource:       rm.downloadSource,
 		CustomDownloadSource: rm.customDownloadSource,
 	}
+}
+
+func (rm *RuleManager) saveSettingsConfig() error {
+	rm.mu.RLock()
+	settings := rm.settingsSnapshot()
+	rm.mu.RUnlock()
 
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(rm.settingsPath), 0755); err != nil {
-		return err
-	}
-	if err := writeFileAtomic(rm.settingsPath, data, 0644); err != nil {
+
+	rm.saveMu.Lock()
+	err = writeFileAtomic(rm.settingsPath, data, 0644)
+	rm.saveMu.Unlock()
+	if err != nil {
 		return err
 	}
 	rm.triggerConfigSaved()
 	return nil
 }
 
-// writeFileAtomic writes data via a temp file + rename so a concurrent reader
-// (or a crash mid-write) can never observe a truncated config file.
+// writeFileAtomic writes data through a uniquely named temp file so two
+// concurrent saves can never interleave into the same path, then renames it
+// into place.
 func writeFileAtomic(path string, data []byte, perm fs.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, data, perm)
 }
 
 func (rm *RuleManager) saveRulesConfig() error {
@@ -1245,11 +1270,14 @@ func (rm *RuleManager) saveRulesConfig() error {
 	// v0.7 分层保存（issue #172）：config.json 只写有效状态；上游备份
 	// （config.upstream.json）仅由规则更新和迁移改写。用户差量不落盘，
 	// 下次加载时由有效状态与备份求差自动恢复。
-	if err := rm.saveEffectiveRulesConfig(); err != nil {
+	rm.saveMu.Lock()
+	err := rm.saveEffectiveRulesConfig()
+	rm.saveMu.Unlock()
+	if err != nil {
 		return err
 	}
 	rm.updateRulesFileHash()
-	rm.triggerConfigSaved()
+	rm.triggerConfigSavedLocked()
 	return nil
 }
 
@@ -1257,10 +1285,9 @@ func (rm *RuleManager) saveRulesConfig() error {
 func (rm *RuleManager) GetECHProfiles() []ECHProfile {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	if rm.echProfiles == nil {
-		return []ECHProfile{}
-	}
-	return rm.echProfiles
+	out := make([]ECHProfile, len(rm.echProfiles))
+	copy(out, rm.echProfiles)
+	return out
 }
 
 // UpsertECHProfile 新增或更新一个 ECH 配置档案。

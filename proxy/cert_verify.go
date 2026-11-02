@@ -47,6 +47,16 @@ func normalizeCertVerifyConfig(cfg CertVerifyConfig, verifyName string) CertVeri
 	return out
 }
 
+// defaultUpstreamCertVerify verifies the real hostname unless the rule
+// fabricates its SNI, which cannot match a certificate name.
+func defaultUpstreamCertVerify(rule Rule, verifyName string) CertVerifyConfig {
+	fake := normalizeHost(rule.SniFake)
+	if fake != "" && fake != normalizeHost(verifyName) {
+		return CertVerifyConfig{Mode: "chain_only"}
+	}
+	return CertVerifyConfig{Mode: "strict_real"}
+}
+
 func buildVerifyConnection(realName string, cfg CertVerifyConfig) func(utls.ConnectionState) error {
 	cfg = normalizeCertVerifyConfig(cfg, realName)
 	if cfg.Mode == "" {

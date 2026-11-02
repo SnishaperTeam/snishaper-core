@@ -24,7 +24,6 @@ import (
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
 	"github.com/SnishaperTeam/snishaper-core/log"
 	"github.com/SnishaperTeam/snishaper-core/netiface"
-	"github.com/SnishaperTeam/snishaper-core/subscription"
 	"github.com/SnishaperTeam/snishaper-core/tlsfrag"
 
 	"github.com/miekg/dns"
@@ -353,16 +352,16 @@ type ProxyServer struct {
 	cfPool            *cfpool.CloudflarePool
 	// ipPools holds named non-Cloudflare pools (cloudfront, user-defined CDNs),
 	// keyed by pool name; rules reference them via Rule.IPPool.
-	ipPools           map[string]*cfpool.CloudflarePool
-	transport         *http.Transport
+	ipPools   map[string]*cfpool.CloudflarePool
+	transport *http.Transport
 	// candidateTransport 是 transport 的懒加载克隆，DialContext 按"请求上下文
 	// 携带的候选+规则"拨号；所有明文 HTTP 请求共享它以复用连接池（受 p.mu 保护）。
 	candidateTransport *http.Transport
-	logCallback       func(string)
-	logger            log.Logger
-	bytesDown         int64
-	bytesUp           int64
-	certBypassMap     sync.Map
+	logCallback        func(string)
+	logger             log.Logger
+	bytesDown          int64
+	bytesUp            int64
+	certBypassMap      sync.Map
 	// echRuntimeConfigs holds hot-patched ECH configs after server rejection
 	// (keyed by profile ID or "host:<name>"). Preferred over persisted profiles
 	// so a retry can take effect even when profile save fails or ID is empty.
@@ -1070,7 +1069,13 @@ func (p *ProxyServer) Stop() error {
 		}
 	}
 
-	subscription.ReleaseWireguardDialers()
+	// Release only the tunnels this server dialed: the WireGuard pool is
+	// process-wide, and another embedded server may still be running.
+	if p.rules != nil {
+		if store := p.rules.GetSubscriptionStore(); store != nil {
+			store.ReleaseWireguardDialers()
+		}
+	}
 
 	mainLn := p.mainListener
 	httpChanLn := p.httpChanLn
@@ -1136,9 +1141,23 @@ func (l *chanListener) Accept() (net.Conn, error) {
 	}
 }
 
-// Close closes the listener channel, unblocking Accept.
+// Close closes the listener channel, unblocking Accept, and closes every
+// connection still queued in it — those were never accepted, so nothing else
+// owns them.
 func (l *chanListener) Close() error {
-	l.once.Do(func() { close(l.closed) })
+	l.once.Do(func() {
+		close(l.closed)
+		for {
+			select {
+			case conn := <-l.ch:
+				if conn != nil {
+					_ = conn.Close()
+				}
+			default:
+				return
+			}
+		}
+	})
 	return nil
 }
 
@@ -1152,11 +1171,6 @@ type peekedConn struct {
 
 // Read reads from the buffered reader.
 func (c *peekedConn) Read(b []byte) (int, error) { return c.r.Read(b) }
-
-type trackingListener struct {
-	net.Listener
-	proxy *ProxyServer
-}
 
 type statConn struct {
 	net.Conn
@@ -1180,19 +1194,6 @@ func (c *statConn) Write(p []byte) (n int, err error) {
 		atomic.AddInt64(c.bytesDown, int64(n))
 	}
 	return n, err
-}
-
-// Accept waits for a connection and wraps it for stats tracking.
-func (l *trackingListener) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
-	return &statConn{
-		Conn:      conn,
-		bytesDown: &l.proxy.bytesDown,
-		bytesUp:   &l.proxy.bytesUp,
-	}, nil
 }
 
 type bufferedReadConn struct {
@@ -1715,10 +1716,6 @@ func normalizeStringList(values []string) []string {
 		return nil
 	}
 	return out
-}
-
-func defaultDNSNodes() []DNSNode {
-	return []DNSNode{}
 }
 
 // dohUserAgent builds the DoH User-Agent for the given brand. It mirrors the

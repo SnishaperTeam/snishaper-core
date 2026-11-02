@@ -23,6 +23,10 @@ type Node struct {
 	// would load — nested blocks like ws-opts/reality-opts/grpc-opts that
 	// the flattened Options map cannot carry survive here.
 	Raw map[string]any `json:"raw,omitempty"`
+
+	// scope ties a node to the Store that handed it out, so pooled resources
+	// (WireGuard tunnels) can be released per owner instead of per process.
+	scope *dialerScope
 }
 
 // Group is a Clash proxy-group.

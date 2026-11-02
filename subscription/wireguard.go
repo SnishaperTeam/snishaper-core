@@ -39,18 +39,29 @@ type wireguardDialer struct {
 	closed bool
 }
 
-// wireguardPool keeps one tunnel per node so the handshake cost is paid once.
-// A WireGuard session is stateful, so it must be reused rather than rebuilt for
-// every connection.
+// dialerScope identifies the owner of a pooled tunnel, so one embedded server
+// cannot release another one's.
+type dialerScope struct{}
+
+// wireguardEntryKey identifies a pooled tunnel: its owner plus everything that
+// shapes it.
+type wireguardEntryKey struct {
+	scope *dialerScope
+	node  string
+}
+
+// wireguardPool keeps one tunnel per (owner, node) so the handshake cost is
+// paid once. A WireGuard session is stateful, so it must be reused rather than
+// rebuilt for every connection.
 var (
 	wireguardPoolMu sync.Mutex
-	wireguardPool   = map[string]*wireguardDialer{}
+	wireguardPool   = map[wireguardEntryKey]*wireguardDialer{}
 )
 
 // acquireWireguardDialer returns the shared tunnel for a node, creating it on
 // first use.
 func acquireWireguardDialer(node Node) (*wireguardDialer, error) {
-	key := wireguardPoolKey(node)
+	key := wireguardEntryKey{scope: node.scope, node: wireguardPoolKey(node)}
 
 	wireguardPoolMu.Lock()
 	if d, ok := wireguardPool[key]; ok {
@@ -86,12 +97,17 @@ func acquireWireguardDialer(node Node) (*wireguardDialer, error) {
 	return d, nil
 }
 
-// releaseWireguardDialer closes every pooled tunnel. It is used when the
-// subscription is reloaded or the proxy shuts down.
-func releaseWireguardDialer() {
+// releaseWireguardDialer closes the pooled tunnels of one scope. A nil scope
+// releases every tunnel in the process.
+func releaseWireguardDialer(scope *dialerScope) {
 	wireguardPoolMu.Lock()
-	pool := wireguardPool
-	wireguardPool = map[string]*wireguardDialer{}
+	pool := make(map[wireguardEntryKey]*wireguardDialer, len(wireguardPool))
+	for k, d := range wireguardPool {
+		if scope == nil || k.scope == scope {
+			pool[k] = d
+			delete(wireguardPool, k)
+		}
+	}
 	wireguardPoolMu.Unlock()
 
 	for _, d := range pool {
@@ -99,11 +115,11 @@ func releaseWireguardDialer() {
 	}
 }
 
-// ReleaseWireguardDialers closes every pooled WireGuard tunnel. Call it when
-// the active subscription changes or the proxy shuts down; the next dial
-// through a WireGuard node rebuilds its tunnel from scratch.
+// ReleaseWireguardDialers closes every pooled WireGuard tunnel in the process.
+// Call it on process shutdown; embedders that only own part of the process
+// should use Store.ReleaseWireguardDialers instead.
 func ReleaseWireguardDialers() {
-	releaseWireguardDialer()
+	releaseWireguardDialer(nil)
 }
 
 // wireguardPoolKey identifies a tunnel by everything that shapes it.
@@ -597,6 +613,6 @@ var _ N.PacketConn = (*wireguardPacketConn)(nil)
 // discardWireguardDialer drops a failed tunnel from the pool.
 func discardWireguardDialer(node Node) {
 	wireguardPoolMu.Lock()
-	delete(wireguardPool, wireguardPoolKey(node))
+	delete(wireguardPool, wireguardEntryKey{scope: node.scope, node: wireguardPoolKey(node)})
 	wireguardPoolMu.Unlock()
 }

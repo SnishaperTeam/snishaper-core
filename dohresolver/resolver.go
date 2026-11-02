@@ -119,6 +119,11 @@ type FailoverResolver struct {
 	// 同一域名的并发 ResolveIPs 只有一个真正发起 DoH 查询，其余等待其结果。
 	resolveInflight sync.Map
 
+	// sweepMu guards lastSweep: the positive/negative caches have no other
+	// owner, so an occasional sweep bounds them to recently used domains.
+	sweepMu   sync.Mutex
+	lastSweep time.Time
+
 	clientMu    sync.Mutex             // 保护 clients
 	clients     map[string]*nodeClient // node 配置指纹 -> 复用中的 DoH 客户端
 	clientLocks [keyLockShards]sync.Mutex
@@ -649,6 +654,8 @@ func (r *FailoverResolver) TestNode(ctx context.Context, node DNSNode) ([]string
 
 // ResolveIPs 解析域名并返回 IP 字符串列表。
 func (r *FailoverResolver) ResolveIPs(ctx context.Context, domain string) ([]string, error) {
+	r.maybeSweep()
+
 	// 负缓存命中：该域名最近解析失败，立即返回错误。这是重试风暴下的
 	// 第一道闸门 —— 不查缓存的话，每个并发调用都会重新扇出完整 DoH 查询。
 	if v, ok := r.negCache.Load(domain); ok {
@@ -721,6 +728,33 @@ func (r *FailoverResolver) resolveSingleflight(ctx context.Context, domain strin
 	return call.ips, call.err
 }
 
+// maybeSweep drops expired cache entries at most once a minute.
+func (r *FailoverResolver) maybeSweep() {
+	r.sweepMu.Lock()
+	if time.Since(r.lastSweep) < time.Minute {
+		r.sweepMu.Unlock()
+		return
+	}
+	r.lastSweep = time.Now()
+	r.sweepMu.Unlock()
+
+	now := time.Now()
+	r.dnsCache.Range(func(key, value any) bool {
+		entry, ok := value.(*dnsCacheEntry)
+		if !ok || now.After(entry.staleAt) {
+			r.dnsCache.Delete(key)
+		}
+		return true
+	})
+	r.negCache.Range(func(key, value any) bool {
+		if expiry, ok := value.(time.Time); ok && now.After(expiry) {
+			r.negCache.Delete(key)
+		}
+		return true
+	})
+}
+
+// resolveAndCache 执行真实解析并写入正缓存。
 func (r *FailoverResolver) resolveAndCache(ctx context.Context, domain string) ([]string, error) {
 	ipAddrs, err := r.ResolveIPAddrs(ctx, domain)
 	if err != nil {

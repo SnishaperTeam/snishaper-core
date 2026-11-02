@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter"
@@ -29,16 +30,18 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-func init() {
-	// The core adapters log dial failures via the mihomo logger, which
-	// writes to stdout by default; silence it — errors come back as values.
+// quietMihomoLog silences the Clash core's logger on first use instead of at
+// import time. The library promises no init() side effects: a package init
+// would flip process-wide logging for every embedder before it can opt out.
+var quietMihomoLog = sync.OnceFunc(func() {
 	mihomolog.SetLevel(mihomolog.SILENT)
-}
+})
 
 // MihomoProxy builds the Clash-core proxy for this node from its raw
 // subscription config. It returns an error when the node carries no raw
 // config (hand-constructed nodes; the legacy dialers apply there).
 func (n Node) MihomoProxy() (C.Proxy, error) {
+	quietMihomoLog()
 	if n.Raw == nil {
 		return nil, fmt.Errorf("node %q has no raw clash config", n.Name)
 	}

@@ -31,6 +31,9 @@ func (p *ProxyServer) handleMITM(clientConn net.Conn, host string, rule Rule, di
 	p.handleMITMWithConn(clientConn, host, rule, dialCandidates, initialDialAddr, nil)
 }
 
+// mitmHandshakeTimeout bounds the client-side TLS handshake after hijack.
+const mitmHandshakeTimeout = 15 * time.Second
+
 // negotiatedProtoOf reports the ALPN protocol of an already handshaked TLS
 // connection, defaulting to http/1.1 when the peer did not negotiate one.
 func negotiatedProtoOf(conn net.Conn) string {
@@ -59,8 +62,8 @@ func (p *ProxyServer) handleMITMWithConn(clientConn net.Conn, host string, rule 
 	p.tracef("[MITM] Handling %s with SNI: %s", host, rule.SniFake)
 
 	if p.certGenerator == nil {
-		p.tracef("[MITM] No cert generator, falling back to direct")
-		p.directTunnel(clientConn, clientConn)
+		p.tracef("[MITM] No cert generator, closing connection")
+		_ = clientConn.Close()
 		return
 	}
 
@@ -168,6 +171,7 @@ func (p *ProxyServer) handleMITMWithConn(clientConn net.Conn, host string, rule 
 	}
 
 	clientTls := tls.Server(clientConn, tlsConfig)
+	_ = clientConn.SetDeadline(time.Now().Add(mitmHandshakeTimeout))
 	if err := clientTls.Handshake(); err != nil {
 		p.tracef("[MITM] Client TLS handshake failed: %v", err)
 		clientConn.Close()
@@ -176,6 +180,7 @@ func (p *ProxyServer) handleMITMWithConn(clientConn net.Conn, host string, rule 
 		}
 		return
 	}
+	_ = clientConn.SetDeadline(time.Time{})
 	defer func() {
 		if upstreamRW != nil {
 			upstreamRW.Close()
@@ -364,12 +369,11 @@ func (p *ProxyServer) GetUConn(conn net.Conn, sni string, verifyName string, rul
 		skipVerify = false
 		verifyConn = nil
 	} else if !bypassed && skipVerify && verifyConn == nil {
-		// 未显式配置证书校验时不直接放行：默认回落为仅链校验
-		// （不匹配主机名，SNI 可能是被主动伪造的）。
-		// 自签/私有 CA 上游需显式配置 cert_verify（allow_unknown_authority）
-		// 或加入豁免列表。
+		// 未显式配置证书校验时按规则选择默认模式：伪造 SNI 的规则无法匹配
+		// 主机名，只能做链校验；其余规则必须校验真实主机名 —— 只做链校验
+		// 会接受任意 CA 签发的证书，等于对主动中间人完全放行。
 		skipVerify = false
-		verifyConn = buildVerifyConnection(verifyName, CertVerifyConfig{Mode: "chain_only"})
+		verifyConn = buildVerifyConnection(verifyName, defaultUpstreamCertVerify(rule, verifyName))
 	}
 
 	config := &utls.Config{
@@ -531,9 +535,9 @@ func (p *ProxyServer) NewQUICRoundTripper(host string, rule Rule) (*http3.Transp
 		tlsConfig.InsecureSkipVerify = false
 		p.tracef("[QUIC] ECH enabled host=%s innerSNI=%s echLen=%d", host, innerSNI, len(echConfig))
 	} else if verifyConn == nil && !bypassed {
-		// 默认仅校验证书链（不匹配主机名），不再无验证放行；
+		// 默认校验真实主机名（伪造 SNI 时只能做链校验），不再无验证放行；
 		// 自签/私有 CA 上游需显式配置 cert_verify 或加入豁免列表
-		verifyConn = buildVerifyConnection(host, CertVerifyConfig{Mode: "chain_only"})
+		verifyConn = buildVerifyConnection(host, defaultUpstreamCertVerify(rule, host))
 	}
 
 	if verifyConn != nil && len(echConfig) == 0 {
@@ -601,10 +605,12 @@ func (p *ProxyServer) handleQUICMITM(clientConn net.Conn, host string, rule Rule
 
 	tlsConfig := p.makeMITMTLSConfig(host, caCert, caKey, []string{"http/1.1"}, "[QUICMode]")
 	clientTLS := tls.Server(clientConn, tlsConfig)
+	_ = clientConn.SetDeadline(time.Now().Add(mitmHandshakeTimeout))
 	if err := clientTLS.Handshake(); err != nil {
 		p.tracef("[QUICMode] Client TLS handshake failed: %v", err)
 		return
 	}
+	_ = clientConn.SetDeadline(time.Time{})
 	p.tracef("[QUICMode] TLS handshake OK for %s, negotiated proto: %s", host, clientTLS.ConnectionState().NegotiatedProtocol)
 
 	quicTransport, err := p.NewQUICRoundTripper(host, rule)
@@ -704,11 +710,6 @@ func removeHopByHopHeaders(h http.Header) {
 		h.Del(name)
 	}
 }
-
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-// RoundTrip calls the wrapped round-trip function.
-func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // oneConnListener exposes a single net.Conn to http.Server.Serve and keeps
 // Accept blocked until that connection (or the listener) is closed. This

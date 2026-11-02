@@ -1103,6 +1103,7 @@ func (h *Handler) forwardUDPDirect(ctx context.Context, conn N.PacketConn, sourc
 	packetConn, err := listenConfig.ListenPacket(context.Background(), network, ":0")
 	if err != nil {
 		h.logger.Warn("failed to create UDP conn", "error", err)
+		_ = conn.Close()
 		if onClose != nil {
 			onClose(err)
 		}
@@ -1111,6 +1112,7 @@ func (h *Handler) forwardUDPDirect(ctx context.Context, conn N.PacketConn, sourc
 	remoteConn, ok := packetConn.(*net.UDPConn)
 	if !ok {
 		_ = packetConn.Close()
+		_ = conn.Close()
 		h.logger.Warn("unexpected UDP socket type")
 		if onClose != nil {
 			onClose(err)

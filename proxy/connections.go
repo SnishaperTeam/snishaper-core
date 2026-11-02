@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"container/list"
 	"net"
 	"sort"
 	"sync"
@@ -12,18 +13,18 @@ import (
 // ProxyServer.ActiveConnections. Fields the proxy cannot know are left empty:
 // the UI must present an empty field as "unavailable", never as confirmed data.
 type ConnInfo struct {
-	ID          uint64    `json:"id"`
-	Protocol    string    `json:"protocol"`             // "https" (CONNECT tunnel), "socks5"
-	Host        string    `json:"host,omitempty"`       // requested host (domain or literal IP)
-	DstAddr     string    `json:"dst_addr,omitempty"`   // dialed destination ip:port, when known
-	Rule        string    `json:"rule,omitempty"`       // site-group ID of the matched rule
-	RuleDomain  string    `json:"rule_domain,omitempty"` // domain pattern that matched
-	Mode        string    `json:"mode"`                 // effective proxy mode
-	Source      string    `json:"source,omitempty"`     // "manual", "auto" or "default"
-	State       string    `json:"state"`                // "active" while the tunnel is open
-	StartedAt   time.Time `json:"started_at"`
-	BytesUp     int64     `json:"bytes_up"`             // client → remote
-	BytesDown   int64     `json:"bytes_down"`           // remote → client
+	ID         uint64    `json:"id"`
+	Protocol   string    `json:"protocol"`              // "https" (CONNECT tunnel), "socks5"
+	Host       string    `json:"host,omitempty"`        // requested host (domain or literal IP)
+	DstAddr    string    `json:"dst_addr,omitempty"`    // dialed destination ip:port, when known
+	Rule       string    `json:"rule,omitempty"`        // site-group ID of the matched rule
+	RuleDomain string    `json:"rule_domain,omitempty"` // domain pattern that matched
+	Mode       string    `json:"mode"`                  // effective proxy mode
+	Source     string    `json:"source,omitempty"`      // "manual", "auto" or "default"
+	State      string    `json:"state"`                 // "active" while the tunnel is open
+	StartedAt  time.Time `json:"started_at"`
+	BytesUp    int64     `json:"bytes_up"`   // client → remote
+	BytesDown  int64     `json:"bytes_down"` // remote → client
 }
 
 // maxTrackedConns bounds the registry so connection inspection can never grow
@@ -34,17 +35,19 @@ type connRegistry struct {
 	mu      sync.RWMutex
 	nextID  uint64
 	entries map[uint64]*trackedEntry
-	order   []uint64 // registration order, oldest first, for bounded eviction
+	// order keeps registration order: eviction drops the oldest, removal is O(1).
+	order *list.List
 }
 
 type trackedEntry struct {
 	info ConnInfo // immutable after registration; counters live below
 	up   atomic.Int64
 	down atomic.Int64
+	elem *list.Element
 }
 
 func newConnRegistry() *connRegistry {
-	return &connRegistry{entries: make(map[uint64]*trackedEntry)}
+	return &connRegistry{entries: make(map[uint64]*trackedEntry), order: list.New()}
 }
 
 func (r *connRegistry) register(info ConnInfo) (uint64, *trackedEntry) {
@@ -52,30 +55,32 @@ func (r *connRegistry) register(info ConnInfo) (uint64, *trackedEntry) {
 	defer r.mu.Unlock()
 	r.nextID++
 	id := r.nextID
-	if r.entries == nil {
-		r.entries = make(map[uint64]*trackedEntry)
-	}
-	if len(r.entries) >= maxTrackedConns && len(r.order) > 0 {
-		oldest := r.order[0]
-		r.order = r.order[1:]
-		delete(r.entries, oldest)
+	if len(r.entries) >= maxTrackedConns && r.order.Len() > 0 {
+		if oldest := r.order.Front(); oldest != nil {
+			r.order.Remove(oldest)
+			if evicted, ok := oldest.Value.(uint64); ok {
+				delete(r.entries, evicted)
+			}
+		}
 	}
 	entry := &trackedEntry{info: info}
+	entry.elem = r.order.PushBack(id)
 	r.entries[id] = entry
-	r.order = append(r.order, id)
 	return id, entry
 }
 
 func (r *connRegistry) remove(id uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.entries, id)
-	for i, v := range r.order {
-		if v == id {
-			r.order = append(r.order[:i], r.order[i+1:]...)
-			break
-		}
+	entry, ok := r.entries[id]
+	if !ok {
+		return
 	}
+	if entry.elem != nil {
+		r.order.Remove(entry.elem)
+		entry.elem = nil
+	}
+	delete(r.entries, id)
 }
 
 func (r *connRegistry) snapshot() []ConnInfo {

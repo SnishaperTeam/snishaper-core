@@ -2,7 +2,6 @@ package cfpool
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,10 +19,10 @@ import (
 
 // IPStats holds a pool IP with its latency and health-check statistics.
 type IPStats struct {
-	IP            string    `json:"ip"`
-	Latency       string    `json:"latency"`
-	Failures      int       `json:"failures"`
-	LastCheck     string    `json:"last_check"`
+	IP            string `json:"ip"`
+	Latency       string `json:"latency"`
+	Failures      int    `json:"failures"`
+	LastCheck     string `json:"last_check"`
 	LatencyVal    time.Duration
 	LastCheckTime time.Time
 }
@@ -35,6 +34,7 @@ type CloudflarePool struct {
 	mu        sync.RWMutex
 	stopChan  chan struct{}
 	running   bool
+	stopping  bool
 	wg        sync.WaitGroup // Track goroutine lifecycle
 
 	// 最快 IP 缓存及 5分钟的过期时间
@@ -129,10 +129,14 @@ func (p *CloudflarePool) Stop() {
 		return
 	}
 	p.running = false
+	p.stopping = true
 	close(p.stopChan)
 	p.mu.Unlock()
 
 	p.wg.Wait() // Wait for goroutine to exit
+	p.mu.Lock()
+	p.stopping = false
+	p.mu.Unlock()
 }
 
 // UpdateIPs replaces the pool membership, keeping known IPs and their stats.
@@ -231,8 +235,17 @@ func (p *CloudflarePool) GetAllIPsWithStats() []*IPStats {
 }
 
 // spawnCheck 在 WaitGroup 下启动一次全池健康检查，Stop 会等它结束。
+// Stop 之后（或未 Start 时）不再启动：Add 与 Wait 并发会让 WaitGroup
+// panic（"WaitGroup is reused before previous Wait has returned"）。
 func (p *CloudflarePool) spawnCheck() {
+	p.mu.Lock()
+	if !p.running || p.stopping {
+		p.mu.Unlock()
+		return
+	}
 	p.wg.Add(1)
+	p.mu.Unlock()
+
 	go func() {
 		defer p.wg.Done()
 		p.checkAllIPs()
@@ -278,10 +291,31 @@ func (p *CloudflarePool) RemoveInvalidIPs() int {
 	return count
 }
 
+// statsForLocked maps a dialed address (NAT64-mapped under NAT64) back to its
+// pool entry. Callers must hold p.mu.
+func (p *CloudflarePool) statsForLocked(addr string) *IPStats {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if stats, ok := p.allIPs[host]; ok {
+		return stats
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To4() != nil {
+		return nil
+	}
+	if stats, ok := p.allIPs[net.IPv4(ip[12], ip[13], ip[14], ip[15]).String()]; ok {
+		return stats
+	}
+	return nil
+}
+
 // ReportFailure records a connection failure for the given IP.
 func (p *CloudflarePool) ReportFailure(ip string) {
 	p.mu.Lock()
-	if stats, ok := p.allIPs[ip]; ok {
+	if stats := p.statsForLocked(ip); stats != nil {
 		stats.Failures++
 		stats.LatencyVal += 1000 * time.Millisecond // Penalize latency
 		stats.Latency = stats.LatencyVal.String()
@@ -305,7 +339,7 @@ func (p *CloudflarePool) ReportFailure(ip string) {
 // ReportSuccess records a successful connection for the given IP.
 func (p *CloudflarePool) ReportSuccess(ip string) {
 	p.mu.Lock()
-	if stats, ok := p.allIPs[ip]; ok {
+	if stats := p.statsForLocked(ip); stats != nil {
 		if stats.Failures > 0 {
 			stats.Failures--
 		}
@@ -402,8 +436,6 @@ func (p *CloudflarePool) rebuildActiveIPs() {
 
 	p.activeIPs = newActive
 }
-
-
 
 func (p *CloudflarePool) testIP(ip string) (time.Duration, error) {
 	prefix := p.getNAT64Prefix()
@@ -540,7 +572,7 @@ func (p *CloudflarePool) DialParallel(ctx context.Context, network string, port 
 	var winningAddr string
 	var winningRawIP string
 
-	collect:
+collect:
 	for i := 0; i < len(candidates); i++ {
 		select {
 		case res := <-resChan:
@@ -550,9 +582,9 @@ func (p *CloudflarePool) DialParallel(ctx context.Context, network string, port 
 					winningConn = res.conn
 					winningAddr = net.JoinHostPort(res.mappedIP, port)
 					winningRawIP = res.rawIP
-				cancel() // 取消其他竞速协程的拨号
-				// 拿到赢家立刻停止收集，尽快返回；其余结果由收尾排空逻辑关闭。
-				break collect
+					cancel() // 取消其他竞速协程的拨号
+					// 拿到赢家立刻停止收集，尽快返回；其余结果由收尾排空逻辑关闭。
+					break collect
 				}
 				res.conn.Close()
 			} else {
@@ -671,12 +703,7 @@ func FetchCDNIPs(cdn string, apiKey string) ([]string, error) {
 	}
 	url := fmt.Sprintf("https://www.wetest.vip/api/cf2dns/%s?key=%s&type=v4", endpoint, apiKey)
 
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err

@@ -39,43 +39,46 @@ func (rm *RuleManager) ApplyActiveSubscriptionRules() {
 		return
 	}
 
-	subscription.ReleaseWireguardDialers()
+	store.ReleaseWireguardDialers()
 
 	active := store.ActiveEntry()
 	if active == nil {
 		return
 	}
 
+	var groups []SiteGroup
 	if active.Builtin {
-		rm.mu.Lock()
-		rm.siteGroups = rm.builtinSiteGroups
-		rm.mu.Unlock()
-		rm.buildRules()
-		rm.logf("[Subscription] active subscription is default rules, restored %d site groups", len(rm.builtinSiteGroups))
-		return
-	}
-
-	converted := make([]SiteGroup, 0, len(active.SiteGroups))
-	for _, sg := range active.SiteGroups {
-		converted = append(converted, SiteGroup{
-			ID:         sg.ID,
-			Name:       sg.Name,
-			Mode:       sg.Mode,
-			DNSMode:    sg.DNSMode,
-			SniFake:    sg.SniFake,
-			Domains:    sg.Domains,
-			ECHEnabled: false,
-			UseCFPool:  false,
-			Website:    sg.Website,
-			Enabled:    true,
-		})
+		rm.mu.RLock()
+		groups = append([]SiteGroup(nil), rm.builtinSiteGroups...)
+		rm.mu.RUnlock()
+	} else {
+		groups = make([]SiteGroup, 0, len(active.SiteGroups))
+		for _, sg := range active.SiteGroups {
+			groups = append(groups, SiteGroup{
+				ID:         sg.ID,
+				Name:       sg.Name,
+				Mode:       sg.Mode,
+				DNSMode:    sg.DNSMode,
+				SniFake:    sg.SniFake,
+				Domains:    sg.Domains,
+				ECHEnabled: false,
+				UseCFPool:  false,
+				Website:    sg.Website,
+				Enabled:    true,
+			})
+		}
 	}
 
 	rm.mu.Lock()
-	rm.siteGroups = converted
-	rm.mu.Unlock()
+	rm.siteGroups = groups
 	rm.buildRules()
-	rm.logf("[Subscription] applied %d site groups from subscription %q", len(converted), active.Name)
+	rm.mu.Unlock()
+
+	if active.Builtin {
+		rm.logf("[Subscription] active subscription is default rules, restored %d site groups", len(groups))
+		return
+	}
+	rm.logf("[Subscription] applied %d site groups from subscription %q", len(groups), active.Name)
 }
 
 // activeSubscriptionID returns the active subscription id, or "" when no store

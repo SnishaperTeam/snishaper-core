@@ -297,7 +297,10 @@ func (rm *RuleManager) ImportConfigWithSummary(content string) (ImportSummary, e
 	rm.buildRules()
 	rm.mu.Unlock()
 
-	if err := rm.saveRulesConfig(); err != nil {
+	rm.mu.RLock()
+	err := rm.saveRulesConfig()
+	rm.mu.RUnlock()
+	if err != nil {
 		return ImportSummary{}, err
 	}
 

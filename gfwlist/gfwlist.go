@@ -88,6 +88,8 @@ func (g *GFWList) LoadFromFile(path string) (int, error) {
 }
 
 // IsBlocked checks if the host (or any parent domain) is in the GFW list.
+// The parent walk slices the string instead of splitting and joining it: this
+// runs on the request path for every host when auto-routing is enabled.
 func (g *GFWList) IsBlocked(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" {
@@ -101,20 +103,21 @@ func (g *GFWList) IsBlocked(host string) bool {
 		return false
 	}
 
-	// Exact match
 	if g.domains[host] {
 		return true
 	}
 
-	// Suffix match: walk up the domain hierarchy
-	parts := strings.Split(host, ".")
-	for i := 1; i < len(parts); i++ {
-		parent := strings.Join(parts[i:], ".")
-		if g.domains[parent] {
+	suffix := host
+	for {
+		idx := strings.IndexByte(suffix, '.')
+		if idx < 0 {
+			return false
+		}
+		suffix = suffix[idx+1:]
+		if g.domains[suffix] {
 			return true
 		}
 	}
-	return false
 }
 
 // Count returns the number of domains in the loaded list.

@@ -169,7 +169,7 @@ func (rm *RuleManager) MergeRemoteRules(remote RulesConfig, remoteHash string) (
 		rm.updateRulesFileHash()
 	}
 	if sum.Changed() {
-		rm.triggerConfigSaved()
+		rm.triggerConfigSavedLocked()
 	}
 	return sum, rm.saveSyncState(rulesSyncState{RemoteHash: remoteHash})
 }
