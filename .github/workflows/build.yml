@@ -138,10 +138,11 @@ jobs:
 
       - name: Write build summary
         if: always()
+        continue-on-error: true
+        shell: bash
         run: |
           set -euo pipefail
-          chmod +x .github/scripts/ci/build-summary.sh
-          .github/scripts/ci/build-summary.sh record \
+          bash .github/scripts/ci/build-summary.sh record \
             --project snishaper-core \
             --target "test ${{ matrix.os }}" \
             --tasks "build, vet, test" \
@@ -170,9 +171,14 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          failed="$(jq '[.[] | select(.result != "success" and .result != "skipped")] | length' <<<"$RESULTS")"
-          if [ "$failed" -ne 0 ]; then
-            echo "::error::one or more required CI jobs did not succeed"
+          set -euo pipefail
+          failed="$(jq -r '
+            to_entries
+            | map(select(.value.result != "success" and .value.result != "skipped"))
+            | map("\(.key)=\(.value.result)")
+            | join(" ")' <<<"$RESULTS")"
+          if [ -n "$failed" ]; then
+            echo "::error::one or more required CI jobs did not succeed: ${failed}"
             exit 1
           fi
           echo "all required CI jobs succeeded"
@@ -180,12 +186,12 @@ jobs:
       - name: Write run summary
         if: always()
         continue-on-error: true
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          chmod +x .github/scripts/ci/build-summary.sh
-          .github/scripts/ci/build-summary.sh report --title "snishaper-core Test Summary"
+          bash .github/scripts/ci/build-summary.sh report --title "snishaper-core Test Summary"
 
   # ------------------------------------------------------------------
   # Bots — invoked directly from the build. Only for pull-request
