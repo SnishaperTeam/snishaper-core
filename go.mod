@@ -15,7 +15,7 @@ require (
 	github.com/sagernet/sing-tun v0.9.6
 	github.com/things-go/go-socks5 v0.1.4
 	github.com/vishvananda/netlink v1.3.1
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
