@@ -148,7 +148,7 @@ func (p *ProxyServer) secureOverTunnel(tunnel net.Conn, cr *connectResult) (net.
 		alpn = "http/1.1"
 	}
 
-	uconn := p.GetUConn(tunnel, cr.rule.SniFake, host, cr.rule, allowInsecure, alpn, echBytes)
+	uconn := p.GetUConn(tunnel, chooseUpstreamSNI(host, cr.rule), host, cr.rule, allowInsecure, alpn, echBytes)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

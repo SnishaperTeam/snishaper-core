@@ -677,7 +677,7 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 			}
 
 			allowInsecure := len(echBytes) == 0
-			uconn := p.GetUConn(conn, rule.SniFake, host, rule, allowInsecure, initialALPN, echBytes)
+			uconn := p.GetUConn(conn, chooseUpstreamSNI(host, rule), host, rule, allowInsecure, initialALPN, echBytes)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 			err := uconn.HandshakeContext(ctx)
@@ -744,7 +744,7 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 				// 2. TLS 握手
 				echBytes := sharedECH
 				allowInsecure := len(echBytes) == 0
-				uconn := p.GetUConn(tcpConn, rule.SniFake, host, rule, allowInsecure, initialALPN, echBytes)
+				uconn := p.GetUConn(tcpConn, chooseUpstreamSNI(host, rule), host, rule, allowInsecure, initialALPN, echBytes)
 
 				handshakeCtx, handshakeCancel := context.WithTimeout(raceCtx, 5*time.Second)
 				defer handshakeCancel()
