@@ -31,6 +31,7 @@ type RuleManager struct {
 	closeToTray                   bool
 	hibernateOnClose              bool
 	autoStart                     bool
+	autoStartMethod               string
 	showMainOnAutoStart           bool
 	autoEnableProxyOnAutoStart    bool
 	autoEnableSysProxyOnAutoStart bool
@@ -311,6 +312,7 @@ func NewRuleManager(settingsPath, rulesPath string, opts ...Option) *RuleManager
 		rulesPath:           rulesPath,
 		rules:               []Rule{},
 		closeToTray:         true,
+		autoStartMethod:     "task",
 		showMainOnAutoStart: true,
 		language:            "zh",
 		theme:               "dark",
@@ -470,6 +472,7 @@ func (rm *RuleManager) loadSettingsConfig() error {
 	rm.closeToTray = true
 	rm.hibernateOnClose = false
 	rm.autoStart = false
+	rm.autoStartMethod = "task"
 	rm.showMainOnAutoStart = true
 	rm.autoEnableProxyOnAutoStart = false
 	rm.autoEnableSysProxyOnAutoStart = true
@@ -502,6 +505,9 @@ func (rm *RuleManager) loadSettingsConfig() error {
 	}
 	if config.AutoStart != nil {
 		rm.autoStart = *config.AutoStart
+	}
+	if config.AutoStartMethod != "" {
+		rm.autoStartMethod = config.AutoStartMethod
 	}
 	if config.ShowMainWindowOnAutoStart != nil {
 		rm.showMainOnAutoStart = *config.ShowMainWindowOnAutoStart
@@ -881,6 +887,25 @@ func (rm *RuleManager) SetAutoStart(enabled bool) error {
 	return rm.saveSettingsConfig()
 }
 
+// GetAutoStartMethod 返回开机自启的注册方式（task/service/registry），
+// 空值或未知值按 "task"（任务计划程序）处理，具体分发由各平台实现。
+func (rm *RuleManager) GetAutoStartMethod() string {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	if rm.autoStartMethod == "" {
+		return "task"
+	}
+	return rm.autoStartMethod
+}
+
+// SetAutoStartMethod 设置开机自启的注册方式（task/service/registry）。
+func (rm *RuleManager) SetAutoStartMethod(method string) error {
+	rm.mu.Lock()
+	rm.autoStartMethod = method
+	rm.mu.Unlock()
+	return rm.saveSettingsConfig()
+}
+
 // GetShowMainWindowOnAutoStart 返回自启时是否显示主窗口。
 func (rm *RuleManager) GetShowMainWindowOnAutoStart() bool {
 	rm.mu.RLock()
@@ -1196,6 +1221,7 @@ func (rm *RuleManager) settingsSnapshot() SettingsConfig {
 	closeToTray := rm.closeToTray
 	hibernateOnClose := rm.hibernateOnClose
 	autoStart := rm.autoStart
+	autoStartMethod := rm.autoStartMethod
 	showMainOnAutoStart := rm.showMainOnAutoStart
 	autoEnableProxyOnAutoStart := rm.autoEnableProxyOnAutoStart
 	autoEnableSysProxyOnAutoStart := rm.autoEnableSysProxyOnAutoStart
@@ -1209,6 +1235,7 @@ func (rm *RuleManager) settingsSnapshot() SettingsConfig {
 		CloseToTray:                   &closeToTray,
 		HibernateOnClose:              &hibernateOnClose,
 		AutoStart:                     &autoStart,
+		AutoStartMethod:               autoStartMethod,
 		ShowMainWindowOnAutoStart:     &showMainOnAutoStart,
 		AutoEnableProxyOnAutoStart:    &autoEnableProxyOnAutoStart,
 		AutoEnableSysProxyOnAutoStart: &autoEnableSysProxyOnAutoStart,

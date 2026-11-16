@@ -235,6 +235,7 @@ type SettingsConfig struct {
 	CloseToTray                   *bool             `json:"close_to_tray,omitempty"`
 	HibernateOnClose              *bool             `json:"hibernate_on_close,omitempty"`
 	AutoStart                     *bool             `json:"auto_start,omitempty"`
+	AutoStartMethod               string            `json:"auto_start_method,omitempty"`
 	ShowMainWindowOnAutoStart     *bool             `json:"show_main_window_on_auto_start,omitempty"`
 	AutoEnableProxyOnAutoStart    *bool             `json:"auto_enable_proxy_on_auto_start,omitempty"`
 	AutoEnableSysProxyOnAutoStart *bool             `json:"auto_enable_sysproxy_on_auto_start,omitempty"`
