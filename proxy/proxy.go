@@ -232,6 +232,7 @@ type SettingsConfig struct {
 	// 的同名字段语义一致。
 	ConfigVersion                 int               `json:"config_version,omitempty"`
 	ListenPort                    string            `json:"listen_port"`
+	ListenAddress                 string            `json:"listen_address,omitempty"`
 	CloseToTray                   *bool             `json:"close_to_tray,omitempty"`
 	HibernateOnClose              *bool             `json:"hibernate_on_close,omitempty"`
 	AutoStart                     *bool             `json:"auto_start,omitempty"`

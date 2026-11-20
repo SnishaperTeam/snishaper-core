@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ type RuleManager struct {
 	autoUpdateRules               bool
 
 	listenPort           string
+	listenAddress        string
 	echProfiles          []ECHProfile
 	nat64Profiles        []NAT64Profile
 	autoRouter           *AutoRouter
@@ -487,6 +489,7 @@ func (rm *RuleManager) loadSettingsConfig() error {
 	if config.ListenPort != "" {
 		rm.listenPort = config.ListenPort
 	}
+	rm.listenAddress = config.ListenAddress
 
 	rm.autoRoutingConfig = config.AutoRouting
 	if config.Language != "" {
@@ -746,6 +749,28 @@ func (rm *RuleManager) SetListenPort(port string) {
 	rm.mu.Lock()
 	rm.listenPort = port
 	rm.mu.Unlock()
+}
+
+// GetListenAddress 返回本地监听地址（空值表示默认 127.0.0.1）。
+func (rm *RuleManager) GetListenAddress() string {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	if rm.listenAddress == "" {
+		return "127.0.0.1"
+	}
+	return rm.listenAddress
+}
+
+// SetListenAddress 设置本地监听地址；空串合法（重置为默认 127.0.0.1），
+// 非 IP 格式返回错误。
+func (rm *RuleManager) SetListenAddress(addr string) error {
+	if addr != "" && net.ParseIP(addr) == nil {
+		return fmt.Errorf("invalid listen address %q", addr)
+	}
+	rm.mu.Lock()
+	rm.listenAddress = addr
+	rm.mu.Unlock()
+	return nil
 }
 
 // SaveConfig 将当前配置写回磁盘。
@@ -1231,6 +1256,7 @@ func (rm *RuleManager) settingsSnapshot() SettingsConfig {
 	return SettingsConfig{
 		ConfigVersion: CurrentConfigVersion,
 		ListenPort:    listenPort,
+		ListenAddress: rm.listenAddress,
 
 		CloseToTray:                   &closeToTray,
 		HibernateOnClose:              &hibernateOnClose,

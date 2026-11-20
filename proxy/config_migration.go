@@ -115,23 +115,32 @@ func probeConfigFile(path string, report *MigrationReport, label string) (int, b
 	return version, true, nil
 }
 
+// knownTopLevelKeys 是 settings/rules 两个配置结构认识的全部顶层键，
+// IsKnownTopLevelKey 与 unknownTopLevelKeys 共用这一份权威表。
+var knownTopLevelKeys = map[string]bool{
+	// rules config
+	"site_groups": true, "upstreams": true, "dns_nodes": true,
+	"ech_profiles": true, "nat64_profiles": true, "ip_pools": true,
+	// settings config
+	"listen_port": true, "listen_address": true, "close_to_tray": true, "hibernate_on_close": true,
+	"auto_start": true, "show_main_window_on_auto_start": true,
+	"auto_enable_proxy_on_auto_start": true, "auto_enable_sysproxy_on_auto_start": true,
+	"auto_update_rules": true, "cloudflare_config": true, "auto_routing": true,
+	"tun": true, "fragment": true, "language": true, "theme": true,
+	"appearance_mode": true, "migration_enabled": true, "migration_server": true,
+	"update_channel": true, "download_source": true, "custom_download_source": true,
+	// shared
+	"config_version": true,
+}
+
+// IsKnownTopLevelKey 报告 key 是否为 settings/rules 配置的已知顶层键。
+func IsKnownTopLevelKey(key string) bool {
+	return knownTopLevelKeys[key]
+}
+
 // unknownTopLevelKeys 列出两个配置结构都不认识、也非保留字的顶层键。
 func unknownTopLevelKeys(raw map[string]json.RawMessage, label string) []string {
-	known := map[string]bool{
-		// rules config
-		"site_groups": true, "upstreams": true, "dns_nodes": true,
-		"ech_profiles": true, "nat64_profiles": true, "ip_pools": true,
-		// settings config
-		"listen_port": true, "close_to_tray": true, "hibernate_on_close": true,
-		"auto_start": true, "show_main_window_on_auto_start": true,
-		"auto_enable_proxy_on_auto_start": true, "auto_enable_sysproxy_on_auto_start": true,
-		"auto_update_rules": true, "cloudflare_config": true, "auto_routing": true,
-		"tun": true, "fragment": true, "language": true, "theme": true,
-		"appearance_mode": true, "migration_enabled": true, "migration_server": true,
-		"update_channel": true, "download_source": true, "custom_download_source": true,
-		// shared
-		"config_version": true,
-	}
+	known := knownTopLevelKeys
 	var unknown []string
 	for key := range raw {
 		if !known[key] {
