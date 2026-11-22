@@ -35,6 +35,14 @@ var androidSuCandidates = []string{
 	"/su/bin/su",
 }
 
+// androidShellPathPrefix is prepended to every script run through su. KernelSU
+// and APatch pass the calling process' environment through verbatim, and an
+// Android app process' PATH can be empty or lack /system/bin (seen on MuMu),
+// which makes every toolbox lookup inside the root shell fail with
+// "id: inaccessible or not found". Appending $PATH keeps any tool the root
+// solution itself adds.
+const androidShellPathPrefix = "export PATH=/system/bin:/system/xbin:/sbin:/vendor/bin:/product/bin:/system_ext/bin:/odm/bin:$PATH"
+
 // shQuote single-quotes s for the su shell script.
 func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

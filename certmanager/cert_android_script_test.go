@@ -66,6 +66,19 @@ func TestAndroidSuCandidatesCoverNonPathRootSolutions(t *testing.T) {
 	}
 }
 
+// TestAndroidShellPathPrefixPinsToolDirs guards the PATH prefix prepended to
+// every su script: an app process' PATH can be empty (MuMu + KernelSU), and
+// without /system/bin early in PATH every toolbox call fails inside the root
+// shell. $PATH must stay last so the root solution's own tools still win.
+func TestAndroidShellPathPrefixPinsToolDirs(t *testing.T) {
+	if !strings.HasPrefix(androidShellPathPrefix, "export PATH=/system/bin:") {
+		t.Errorf("path prefix must export /system/bin first: %q", androidShellPathPrefix)
+	}
+	if !strings.HasSuffix(androidShellPathPrefix, ":$PATH") {
+		t.Errorf("path prefix must keep $PATH last: %q", androidShellPathPrefix)
+	}
+}
+
 // TestAndroidCACertNameIsThumbprintScoped keeps anchor names per generation
 // and brand so reinstalls never collide and embedders never see each other.
 func TestAndroidCACertNameIsThumbprintScoped(t *testing.T) {

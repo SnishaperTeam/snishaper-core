@@ -45,6 +45,10 @@ var suPath struct {
 // candidates in androidSuCandidates are walked and the first working one is
 // cached.
 func suScript(timeout time.Duration, script string) (string, error) {
+	// The su shell must never depend on the app process' PATH (see
+	// androidShellPathPrefix).
+	script = androidShellPathPrefix + "\n" + script
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
