@@ -19,6 +19,7 @@ func TestAndroidInstallScriptShape(t *testing.T) {
 		`chcon u:object_r:system_file:s0 /system/etc/security/cacerts`,
 		`nsenter -t 1 -m -- sh -c "$GLOBAL"`,
 		`pidof zygote`,
+		`case "$ZN" in zygote|zygote64) echo "$ZP";; esac`,
 		`nsenter --mount=/proc/$Z_PID/ns/mnt`,
 		`nsenter --mount=/proc/$PID/ns/mnt`,
 		`cp '/data/local/tmp/ca.crt' "$STAGE/snishaper-ca-abcd1234.0"`,

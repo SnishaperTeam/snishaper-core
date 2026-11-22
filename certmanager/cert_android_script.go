@@ -113,6 +113,9 @@ func androidInstallScript(brand config.Brand, caPath, name string) string {
 		`REBIND='` + androidRebindScript() + `'`,
 		`sh -c "$REBIND" 2>/dev/null`,
 		`Z_PIDS="$(pidof zygote 2>/dev/null) $(pidof zygote64 2>/dev/null)"`,
+		// Fallback: on some Android 15 builds (e.g. MuMu) toybox pidof does not
+		// find zygote, while `ps -o NAME` (argv[0]) still lists it.
+		`[ -n "$Z_PIDS" ] || Z_PIDS="$(ps -A -o PID,NAME 2>/dev/null | while read ZP ZN; do case "$ZN" in zygote|zygote64) echo "$ZP";; esac; done)"`,
 		`for Z_PID in $Z_PIDS; do`,
 		`nsenter --mount=/proc/$Z_PID/ns/mnt -- sh -c "$REBIND" 2>/dev/null`,
 		`done`,
