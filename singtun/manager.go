@@ -36,7 +36,10 @@ type Manager struct {
 	brand config.Brand
 	// udpRelay 是可选的 UDP 隧道，由代理层在创建 Manager 时注入；
 	// 非 nil 时 TUN 的 UDP（含 fake-ip / QUIC）经订阅节点转发。
-	udpRelay       UDPRelay
+	udpRelay UDPRelay
+	// quicRewrite 是可选的 QUIC Initial 重写钩子：fake-ip UDP 命中重写策略时
+	// 按站点规则重写后直连真实服务器（CircumVolve QUIC rewrite）。
+	quicRewrite QUICRewriteFunc
 	ifaceConfig    netiface.Config
 	iface          *netiface.Selector
 	networkMonitor tun.NetworkUpdateMonitor
@@ -66,6 +69,20 @@ func (m *Manager) SetUDPRelay(relay UDPRelay) {
 	// 已启动时立即生效，重连订阅节点无需重启 TUN。
 	if handler != nil {
 		handler.SetUDPRelay(relay)
+	}
+}
+
+// SetQUICRewrite 注入按域名查策略的 QUIC Initial 重写钩子（TUN fake-ip
+// UDP 路径）。传 nil 恢复丢弃 fake-ip UDP、等浏览器回退 TCP 的旧行为。
+// 由代理层实现（通常是 RuleManager.MatchQUICStrategies 的适配闭包）。
+func (m *Manager) SetQUICRewrite(hook QUICRewriteFunc) {
+	m.mu.Lock()
+	m.quicRewrite = hook
+	handler := m.handler
+	m.mu.Unlock()
+	// 已启动时立即生效，改规则无需重启 TUN。
+	if handler != nil {
+		handler.SetQUICRewrite(hook)
 	}
 }
 
@@ -240,6 +257,9 @@ func (m *Manager) Start(cfg proxy.TUNConfig, proxyAddr string) (err error) {
 	m.handler.SetInterfaceConfig(cfg.InterfaceConfigFor(m.brand))
 	if m.udpRelay != nil {
 		m.handler.SetUDPRelay(m.udpRelay)
+	}
+	if m.quicRewrite != nil {
+		m.handler.SetQUICRewrite(m.quicRewrite)
 	}
 
 	stackStart := time.Now()

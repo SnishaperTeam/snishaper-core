@@ -25,7 +25,12 @@ func fragEqual(a, b FragmentConfig) bool {
 		a.IntervalMillis() == b.IntervalMillis() &&
 		a.ModMinorVerEnabled() == b.ModMinorVerEnabled() &&
 		a.OOBEnabled() == b.OOBEnabled() &&
-		a.OOBExEnabled() == b.OOBExEnabled()
+		a.OOBExEnabled() == b.OOBExEnabled() &&
+		a.HeaderSplitEnabled() == b.HeaderSplitEnabled() &&
+		a.AltRecordVerEnabled() == b.AltRecordVerEnabled() &&
+		a.PaddingLenInt() == b.PaddingLenInt() &&
+		a.TrailingDotEnabled() == b.TrailingDotEnabled() &&
+		a.HideSNIEnabled() == b.HideSNIEnabled()
 }
 
 func TestNormalizeFragmentConfig_MissingSectionKeepsLegacyPresets(t *testing.T) {
@@ -100,11 +105,27 @@ func TestNormalizeFragmentConfig_DistinguishesMissingFromFalse(t *testing.T) {
 
 func TestNormalizeFragmentConfig_FillsNilBooleans(t *testing.T) {
 	got := normalizeFragmentConfig(FragmentConfig{NumRecords: 1, NumSegments: 2})
-	if got.ModMinorVer == nil || got.OOB == nil || got.OOBEx == nil {
-		t.Fatalf("normalize left nil booleans: minorVer=%v oob=%v oobex=%v", got.ModMinorVer, got.OOB, got.OOBEx)
+	if got.ModMinorVer == nil || got.OOB == nil || got.OOBEx == nil || got.HeaderSplit == nil || got.AltRecordVer == nil || got.TrailingDot == nil || got.HideSNI == nil || got.PaddingLen == nil {
+		t.Fatalf("normalize left nil optionals: minorVer=%v oob=%v oobex=%v headerSplit=%v altRecordVer=%v trailingDot=%v hideSNI=%v paddingLen=%v",
+			got.ModMinorVer, got.OOB, got.OOBEx, got.HeaderSplit, got.AltRecordVer, got.TrailingDot, got.HideSNI, got.PaddingLen)
 	}
-	if got.OOBEnabled() || got.OOBExEnabled() {
-		t.Error("OOB/OOBEx must default to false")
+	if got.OOBEnabled() || got.OOBExEnabled() || got.HeaderSplitEnabled() || got.AltRecordVerEnabled() || got.TrailingDotEnabled() || got.HideSNIEnabled() {
+		t.Error("optional evasion strategies must default to false")
+	}
+	if got.PaddingLenInt() != 0 {
+		t.Errorf("padding must default to 0, got %d", got.PaddingLenInt())
+	}
+}
+
+func TestNormalizeFragmentConfig_ClampsPadding(t *testing.T) {
+	if got := normalizeFragmentConfig(FragmentConfig{PaddingLen: intPtr(-7)}); got.PaddingLenInt() != 0 {
+		t.Errorf("negative padding must clamp to 0, got %d", got.PaddingLenInt())
+	}
+	if got := normalizeFragmentConfig(FragmentConfig{PaddingLen: intPtr(999999)}); got.PaddingLenInt() != fragmentPaddingMax {
+		t.Errorf("oversized padding must clamp to %d, got %d", fragmentPaddingMax, got.PaddingLenInt())
+	}
+	if got := normalizeFragmentConfig(FragmentConfig{PaddingLen: intPtr(512)}); got.PaddingLenInt() != 512 {
+		t.Errorf("in-range padding must survive, got %d", got.PaddingLenInt())
 	}
 }
 
@@ -117,7 +138,8 @@ func TestDefaultFragmentConfig(t *testing.T) {
 }
 
 func TestFragmentConfig_JSONTags(t *testing.T) {
-	raw := `{"num_records":1,"num_segments":2,"interval_ms":80,"mod_minor_ver":false,"oob":true,"oob_ex":true}`
+	raw := `{"num_records":1,"num_segments":2,"interval_ms":80,"mod_minor_ver":false,"oob":true,"oob_ex":true,` +
+		`"header_split":true,"alt_record_ver":true,"padding_len":333,"trailing_dot":true,"hide_sni":true}`
 	var cfg FragmentConfig
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -131,6 +153,15 @@ func TestFragmentConfig_JSONTags(t *testing.T) {
 	}
 	if !cfg.OOBEnabled() || !cfg.OOBExEnabled() {
 		t.Error("oob / oob_ex true must survive decode")
+	}
+	if !cfg.HeaderSplitEnabled() || !cfg.AltRecordVerEnabled() {
+		t.Error("header_split / alt_record_ver true must survive decode")
+	}
+	if cfg.PaddingLenInt() != 333 {
+		t.Errorf("padding_len mis-decoded: %d", cfg.PaddingLenInt())
+	}
+	if !cfg.TrailingDotEnabled() || !cfg.HideSNIEnabled() {
+		t.Error("trailing_dot / hide_sni true must survive decode")
 	}
 }
 

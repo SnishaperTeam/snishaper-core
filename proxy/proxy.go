@@ -24,6 +24,7 @@ import (
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
 	"github.com/SnishaperTeam/snishaper-core/log"
 	"github.com/SnishaperTeam/snishaper-core/netiface"
+	"github.com/SnishaperTeam/snishaper-core/quicrewrite"
 	"github.com/SnishaperTeam/snishaper-core/tlsfrag"
 
 	"github.com/miekg/dns"
@@ -109,12 +110,17 @@ type TUNConfig struct {
 
 // FragmentConfig holds TLS record fragmentation settings.
 type FragmentConfig struct {
-	NumRecords  int   `json:"num_records"`
-	NumSegments int   `json:"num_segments"`
-	IntervalMs  *int  `json:"interval_ms,omitempty"`
-	ModMinorVer *bool `json:"mod_minor_ver,omitempty"`
-	OOB         *bool `json:"oob,omitempty"`
-	OOBEx       *bool `json:"oob_ex,omitempty"`
+	NumRecords   int   `json:"num_records"`
+	NumSegments  int   `json:"num_segments"`
+	IntervalMs   *int  `json:"interval_ms,omitempty"`
+	ModMinorVer  *bool `json:"mod_minor_ver,omitempty"`
+	OOB          *bool `json:"oob,omitempty"`
+	OOBEx        *bool `json:"oob_ex,omitempty"`
+	HeaderSplit  *bool `json:"header_split,omitempty"`
+	AltRecordVer *bool `json:"alt_record_ver,omitempty"`
+	PaddingLen   *int  `json:"padding_len,omitempty"`
+	TrailingDot  *bool `json:"trailing_dot,omitempty"`
+	HideSNI      *bool `json:"hide_sni,omitempty"`
 }
 
 // ModMinorVerEnabled reports whether TLS minor-version modification is on.
@@ -132,6 +138,36 @@ func (c FragmentConfig) OOBExEnabled() bool {
 	return c.OOBEx != nil && *c.OOBEx
 }
 
+// HeaderSplitEnabled reports whether the first record boundary falls inside
+// the handshake header (CircumVolve header split).
+func (c FragmentConfig) HeaderSplitEnabled() bool {
+	return c.HeaderSplit != nil && *c.HeaderSplit
+}
+
+// AltRecordVerEnabled reports whether records carry per-record version bytes
+// (0x0303 then 0x0301).
+func (c FragmentConfig) AltRecordVerEnabled() bool {
+	return c.AltRecordVer != nil && *c.AltRecordVer
+}
+
+// PaddingLenInt returns the RFC 7685 padding size appended to the ClientHello.
+func (c FragmentConfig) PaddingLenInt() int {
+	if c.PaddingLen == nil || *c.PaddingLen < 0 {
+		return 0
+	}
+	return *c.PaddingLen
+}
+
+// TrailingDotEnabled reports whether a trailing dot is appended to the SNI.
+func (c FragmentConfig) TrailingDotEnabled() bool {
+	return c.TrailingDot != nil && *c.TrailingDot
+}
+
+// HideSNIEnabled reports whether the server_name extension is removed.
+func (c FragmentConfig) HideSNIEnabled() bool {
+	return c.HideSNI != nil && *c.HideSNI
+}
+
 // Interval returns the delay between fragmented records.
 func (c FragmentConfig) Interval() time.Duration {
 	if c.IntervalMs == nil {
@@ -146,6 +182,49 @@ func (c FragmentConfig) IntervalMillis() int {
 		return int(tlsfrag.DefaultTLSRFSendInterval / time.Millisecond)
 	}
 	return *c.IntervalMs
+}
+
+// QUICRewriteConfig holds per-site QUIC Initial rewrite switches (CircumVolve
+// QUIC rewrite, applied on the TUN fake-ip UDP path). Each switch mirrors a
+// quicrewrite.Strategies flag; nil means off. A config with no switch on
+// passes Initials through untouched.
+type QUICRewriteConfig struct {
+	ReservedBits   *bool `json:"reserved_bits,omitempty"`
+	PrependACK     *bool `json:"prepend_ack,omitempty"`
+	DecoyCrypto    *bool `json:"decoy_crypto,omitempty"`
+	FragmentCrypto *bool `json:"fragment_crypto,omitempty"`
+	DoubleHello    *bool `json:"double_hello,omitempty"`
+	PunycodeSNI    *bool `json:"punycode_sni,omitempty"`
+}
+
+// AnyEnabled reports whether at least one QUIC rewrite switch is on. A nil
+// config enables nothing.
+func (c *QUICRewriteConfig) AnyEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return (c.ReservedBits != nil && *c.ReservedBits) ||
+		(c.PrependACK != nil && *c.PrependACK) ||
+		(c.DecoyCrypto != nil && *c.DecoyCrypto) ||
+		(c.FragmentCrypto != nil && *c.FragmentCrypto) ||
+		(c.DoubleHello != nil && *c.DoubleHello) ||
+		(c.PunycodeSNI != nil && *c.PunycodeSNI)
+}
+
+// Strategies converts the switches into quicrewrite strategies. A nil config
+// yields the all-off strategies.
+func (c *QUICRewriteConfig) Strategies() quicrewrite.Strategies {
+	if c == nil {
+		return quicrewrite.Strategies{}
+	}
+	return quicrewrite.Strategies{
+		ReservedBits:   c.ReservedBits != nil && *c.ReservedBits,
+		PrependACK:     c.PrependACK != nil && *c.PrependACK,
+		DecoyCrypto:    c.DecoyCrypto != nil && *c.DecoyCrypto,
+		FragmentCrypto: c.FragmentCrypto != nil && *c.FragmentCrypto,
+		DoubleHello:    c.DoubleHello != nil && *c.DoubleHello,
+		PunycodeSNI:    c.PunycodeSNI != nil && *c.PunycodeSNI,
+	}
 }
 
 // InterfaceConfig 把 TUN 设置转换为出站网卡选择配置。
@@ -292,6 +371,9 @@ type Rule struct {
 	Process string `json:"process,omitempty"`
 	// Frag 是这条规则自己的分片参数（仅 tls-rf 模式使用），nil 表示跟随全局。
 	Frag *FragmentConfig `json:"frag,omitempty"`
+	// QUIC 是这条规则的 QUIC Initial 重写开关（TUN fake-ip UDP 路径），
+	// nil 或全关表示不重写（丢弃 fake-ip UDP，浏览器回退 TCP）。
+	QUIC *QUICRewriteConfig `json:"quic,omitempty"`
 }
 
 // SiteGroup groups sites that share the same rule.
@@ -323,6 +405,8 @@ type SiteGroup struct {
 	Process string `json:"process,omitempty"`
 	// Frag 是这个站点组自己的分片参数（仅 tls-rf 模式使用），nil 表示跟随全局。
 	Frag *FragmentConfig `json:"frag,omitempty"`
+	// QUIC 是这个站点组的 QUIC Initial 重写开关（TUN fake-ip UDP 路径）。
+	QUIC *QUICRewriteConfig `json:"quic,omitempty"`
 }
 
 // Upstream defines an upstream proxy server.
@@ -1649,6 +1733,7 @@ const (
 	fragmentSegmentsMax = 16
 	fragmentIntervalMin = 0
 	fragmentIntervalMax = 500
+	fragmentPaddingMax  = 8192
 )
 
 func normalizeFragmentConfig(cfg FragmentConfig) FragmentConfig {
@@ -1688,6 +1773,32 @@ func normalizeFragmentConfig(cfg FragmentConfig) FragmentConfig {
 	if cfg.OOBEx == nil {
 		def := tlsfrag.DefaultTLSRFOOBEx
 		cfg.OOBEx = &def
+	}
+	if cfg.HeaderSplit == nil {
+		def := tlsfrag.DefaultTLSRFHeaderSplit
+		cfg.HeaderSplit = &def
+	}
+	if cfg.AltRecordVer == nil {
+		def := tlsfrag.DefaultTLSRFAltRecordVer
+		cfg.AltRecordVer = &def
+	}
+	if cfg.PaddingLen == nil {
+		def := 0
+		cfg.PaddingLen = &def
+	} else if *cfg.PaddingLen < 0 {
+		v := 0
+		cfg.PaddingLen = &v
+	} else if *cfg.PaddingLen > fragmentPaddingMax {
+		v := fragmentPaddingMax
+		cfg.PaddingLen = &v
+	}
+	if cfg.TrailingDot == nil {
+		def := false
+		cfg.TrailingDot = &def
+	}
+	if cfg.HideSNI == nil {
+		def := false
+		cfg.HideSNI = &def
 	}
 	return cfg
 }

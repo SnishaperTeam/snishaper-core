@@ -82,7 +82,7 @@ func TestSendRecords_TCPOnly_MovesSNIOutOfFirstSegment(t *testing.T) {
 			}
 
 			rec := &recorderConn{}
-			if err := SendRecords(rec, ch, sniPos, sniLen, 1, 2, false, false, false, 0); err != nil {
+			if err := SendRecords(rec, ch, sniPos, sniLen, 1, 2, false, false, false, false, false, 0); err != nil {
 				t.Fatalf("SendRecords: %v", err)
 			}
 
@@ -113,7 +113,7 @@ func TestSendRecords_TCPOnly_RespectsSegmentCount(t *testing.T) {
 
 	for _, want := range []int{2, 3, 4, 8} {
 		rec := &recorderConn{}
-		if err := SendRecords(rec, ch, sniPos, sniLen, 1, want, false, false, false, 0); err != nil {
+		if err := SendRecords(rec, ch, sniPos, sniLen, 1, want, false, false, false, false, false, 0); err != nil {
 			t.Fatalf("SendRecords(segments=%d): %v", want, err)
 		}
 		if len(rec.writes) != want {
@@ -135,7 +135,7 @@ func TestSendRecords_ModMinorVer_Toggle(t *testing.T) {
 			t.Fatalf("ParseClientHello: %v", err)
 		}
 		rec := &recorderConn{}
-		if err := SendRecords(rec, ch, sniPos, sniLen, 1, 2, false, false, true, 0); err != nil {
+		if err := SendRecords(rec, ch, sniPos, sniLen, 1, 2, false, false, true, false, false, 0); err != nil {
 			t.Fatalf("SendRecords: %v", err)
 		}
 		return rec.writes[0]
@@ -152,7 +152,7 @@ func TestSendRecords_ModMinorVer_Toggle(t *testing.T) {
 		t.Fatalf("ParseClientHello: %v", err)
 	}
 	rec := &recorderConn{}
-	if err := SendRecords(rec, ch, sniPos, sniLen, 1, 2, false, false, false, 0); err != nil {
+	if err := SendRecords(rec, ch, sniPos, sniLen, 1, 2, false, false, false, false, false, 0); err != nil {
 		t.Fatalf("SendRecords: %v", err)
 	}
 	if rec.writes[0][2] != 0x01 {
@@ -168,7 +168,7 @@ func TestSendRecords_SingleSegment_SendsAllAtOnce(t *testing.T) {
 		t.Fatalf("ParseClientHello: %v", err)
 	}
 	rec := &recorderConn{}
-	if err := SendRecords(rec, ch, sniPos, sniLen, 1, 1, false, false, false, 0); err != nil {
+	if err := SendRecords(rec, ch, sniPos, sniLen, 1, 1, false, false, false, false, false, 0); err != nil {
 		t.Fatalf("SendRecords: %v", err)
 	}
 	if len(rec.writes) != 1 {
@@ -179,8 +179,8 @@ func TestSendRecords_SingleSegment_SendsAllAtOnce(t *testing.T) {
 	}
 }
 
-// 默认多记录路径（records=4, segments=2）：接收端按 TLS 记录边界重组，
-// 各记录载荷拼接后必须与原始 ClientHello 载荷逐字节一致。
+// 默认多记录路径（records=4, segments=2）：接收端按 TLS 记录边界重组�?
+// 各记录载荷拼接后必须与原�?ClientHello 载荷逐字节一致�?
 func TestSendRecords_MultiRecord_ReassemblesOverPipe(t *testing.T) {
 	host := "github.com"
 	ch := buildClientHelloForTest(host)
@@ -194,7 +194,7 @@ func TestSendRecords_MultiRecord_ReassemblesOverPipe(t *testing.T) {
 
 	sent := make(chan error, 1)
 	go func() {
-		err := SendRecords(client, ch, sniPos, sniLen, 4, 2, false, false, false, 0)
+		err := SendRecords(client, ch, sniPos, sniLen, 4, 2, false, false, false, false, false, 0)
 		client.Close()
 		sent <- err
 	}()

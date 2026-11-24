@@ -99,7 +99,7 @@ func TestRelayUDPReleasesIdleSession(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.relayUDP(ctx, conn, peer, dest, destAddr)
+		h.relayUDP(ctx, conn, peer, dest, destAddr, nil)
 	}()
 
 	select {
@@ -125,7 +125,7 @@ func TestRelayUDPExitsOnContextCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.relayUDP(ctx, conn, peer, dest, destAddr)
+		h.relayUDP(ctx, conn, peer, dest, destAddr, nil)
 	}()
 
 	time.Sleep(200 * time.Millisecond)

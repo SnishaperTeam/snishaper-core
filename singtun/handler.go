@@ -25,6 +25,7 @@ import (
 
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
 	"github.com/SnishaperTeam/snishaper-core/netiface"
+	"github.com/SnishaperTeam/snishaper-core/quicrewrite"
 )
 
 // ponytail: JudgeFlow returns ActionAccept unconditionally; add flow-level
@@ -65,6 +66,10 @@ type Handler struct {
 	// udpRelay 是可选的 UDP 隧道，由代理层注入：订阅节点绑定时，
 	// TUN 的 UDP（含 fake-ip 目标与 QUIC）经节点转发而非直连丢弃。
 	udpRelay UDPRelay
+	// quicRewrite 是可选的 QUIC Initial 重写钩子（CircumVolve QUIC rewrite）：
+	// fake-ip UDP 命中重写策略时，Initial 按站点规则重写后直连真实服务器，
+	// 而非丢弃等浏览器回退 TCP。
+	quicRewrite QUICRewriteFunc
 	mu       sync.Mutex
 	live     map[net.Conn]struct{}
 	// livePacket 与 live 分开统计：packet conn 的关闭语义不同，
@@ -104,6 +109,26 @@ func (h *Handler) getUDPRelay() UDPRelay {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.udpRelay
+}
+
+// QUICRewriteFunc reports the QUIC Initial rewrite strategies for a domain.
+// ok=false (or a nil func) keeps the legacy fake-ip UDP behavior: drop the
+// datagram and let the client fall back to TCP.
+type QUICRewriteFunc func(domain string) (quicrewrite.Strategies, bool)
+
+// SetQUICRewrite installs the per-domain QUIC Initial rewrite hook used on
+// the fake-ip UDP path. Passing nil restores drop-and-TCP-fallback.
+func (h *Handler) SetQUICRewrite(hook QUICRewriteFunc) {
+	h.mu.Lock()
+	h.quicRewrite = hook
+	h.mu.Unlock()
+}
+
+// getQUICRewrite reads the installed QUIC rewrite hook, if any.
+func (h *Handler) getQUICRewrite() QUICRewriteFunc {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.quicRewrite
 }
 
 // track 登记一个 TCP 连接。返回 false 表示 Handler 已关闭，调用方必须
@@ -957,8 +982,11 @@ func isTimeout(err error) bool {
 // 退出条件有三个，任一满足即结束：
 //  1. 任一方向出现真实 socket 错误（含 NAT 关闭会话导致的 io.ErrClosedPipe）
 //  2. ctx 被取消
-//  3. 两个方向都静默超过 TTL —— 这是本函数新增的兜底，修复 socket 泄漏
-func (h *Handler) relayUDP(ctx context.Context, conn N.PacketConn, peer udpRelayPeer, destination M.Socksaddr, destUDPAddr net.Addr) {
+//	3. 两个方向都静默超过 TTL —— 这是本函数新增的兜底，修复 socket 泄漏
+//
+// rewrite（可为 nil）只作用于客户端 → 上游方向：QUIC Initial 重写等逐包
+// 改写发生在这里；非 Initial 或解析失败时由 rewrite 自身 fail-open 原样放行。
+func (h *Handler) relayUDP(ctx context.Context, conn N.PacketConn, peer udpRelayPeer, destination M.Socksaddr, destUDPAddr net.Addr, rewrite func([]byte) ([]byte, bool)) {
 	// lastActive 由两个方向共享：任一方向成功收发即刷新，表示会话仍活跃。
 	var lastActive atomic.Int64
 	lastActive.Store(time.Now().UnixNano())
@@ -1005,9 +1033,16 @@ func (h *Handler) relayUDP(ctx context.Context, conn N.PacketConn, peer udpRelay
 				}
 				return
 			}
-			touch()
+		touch()
 
-			_, err = peer.WriteTo(packetBuf.Bytes(), destUDPAddr)
+		payload := packetBuf.Bytes()
+		if rewrite != nil {
+			// fail-open：非可重写包时 ok=false，payload 保持原样
+			if out, ok := rewrite(payload); ok {
+				payload = out
+			}
+		}
+		_, err = peer.WriteTo(payload, destUDPAddr)
 			packetBuf.Release()
 			if err != nil {
 				h.logger.Warn("failed to forward UDP", "error", err)
@@ -1059,10 +1094,14 @@ func (h *Handler) relayUDP(ctx context.Context, conn N.PacketConn, peer udpRelay
 
 // forwardUDPDirect 直接转发 UDP 流量到上游
 // 仅处理非 fake-ip 的真实 IP 目标（如 DoH 自行解析的应用 QUIC 流量）
-// fake-ip 目标的 UDP 流量直接丢弃（浏览器会回退到 TCP，走代理规则链路）
+// fake-ip 目标先尝试 QUIC Initial 重写钩子，未命中再丢弃（浏览器回退 TCP）
 func (h *Handler) forwardUDPDirect(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
-	// fake-ip 目标无法直接转发（是假地址），丢弃让浏览器回退 TCP
+	// fake-ip 目标无法直接转发（是假地址）
 	if h.fakeIP.Contains(destination.Addr) {
+		if h.tryQUICRewrite(ctx, conn, destination, onClose) {
+			return
+		}
+		// 未命中重写钩子：丢弃让浏览器回退 TCP。
 		// 必须关闭 conn：它在 gVisor 侧代表一个已建立的会话，
 		// 不关会让 session 与其缓冲一并滞留（早退路径的 socket 泄漏）。
 		_ = conn.Close()
@@ -1072,9 +1111,72 @@ func (h *Handler) forwardUDPDirect(ctx context.Context, conn N.PacketConn, sourc
 		return
 	}
 
+	h.relayUDPViaPhysicalIface(ctx, conn, destination, destination.UDPAddr(), nil, onClose)
+}
+
+// tryQUICRewrite attempts the QUIC Initial rewrite path for a fake-ip UDP
+// session (CircumVolve QUIC rewrite on TUN): map the fake address back to its
+// domain, ask the injected hook for strategies, resolve the real server, then
+// relay through the physical interface rewriting each client Initial.
+// Returns false when the session is not eligible (no hook, unknown domain,
+// host not configured for rewrite, resolve failure) and the caller must keep
+// the legacy drop-and-TCP-fallback behavior.
+func (h *Handler) tryQUICRewrite(ctx context.Context, conn N.PacketConn, destination M.Socksaddr, onClose N.CloseHandlerFunc) bool {
+	hook := h.getQUICRewrite()
+	if hook == nil || h.resolver == nil {
+		return false
+	}
+	domain, ok := h.fakeIP.Lookup(destination.Addr)
+	if !ok {
+		return false
+	}
+	strategies, ok := hook(domain)
+	if !ok {
+		return false
+	}
+	// 解析带超时（DoH 上游可能长时间不响应，见 handleDNSRealPacket 的教训）；
+	// 失败保持旧行为（丢弃回退 TCP），不能比旧行为更差。
+	resolveCtx, cancel := context.WithTimeout(ctx, dnsResolveTimeout)
+	defer cancel()
+	ips, err := h.resolver.ResolveIPs(resolveCtx, domain)
+	if err != nil {
+		h.logger.Warn("quic rewrite: resolve failed", "domain", domain, "error", err)
+		return false
+	}
+	// 优先 IPv4（fake-ip 通常是 v4 段，客户端按 v4 语义发起会话）
+	var destIP net.IP
+	for _, ip := range ips {
+		parsed := net.ParseIP(ip)
+		if parsed == nil {
+			continue
+		}
+		if parsed.To4() != nil {
+			destIP = parsed
+			break
+		}
+		if destIP == nil {
+			destIP = parsed
+		}
+	}
+	if destIP == nil {
+		return false
+	}
+	destUDPAddr := &net.UDPAddr{IP: destIP, Port: int(destination.Port)}
+	h.logger.Info("quic rewrite session", "domain", domain, "target", destUDPAddr.String())
+	h.relayUDPViaPhysicalIface(ctx, conn, destination, destUDPAddr, func(datagram []byte) ([]byte, bool) {
+		return quicrewrite.RewriteInitial(datagram, strategies)
+	}, onClose)
+	return true
+}
+
+// relayUDPViaPhysicalIface binds a UDP socket on the physical interface and
+// relays conn ↔ destUDPAddr, applying the optional rewrite to every client
+// datagram before it leaves. Responses always return to destination (the
+// TUN-side address the client dialed, fake-ip included).
+func (h *Handler) relayUDPViaPhysicalIface(ctx context.Context, conn N.PacketConn, destination M.Socksaddr, destUDPAddr *net.UDPAddr, rewrite func([]byte) ([]byte, bool), onClose N.CloseHandlerFunc) {
 	// 按目标地址族选择 udp4/udp6 与对应的物理网卡地址，避免绑定族不匹配
 	network := "udp4"
-	wantIPv6 := destination.Addr.Is6()
+	wantIPv6 := destUDPAddr.IP.To4() == nil
 	if wantIPv6 {
 		network = "udp6"
 	}
@@ -1120,10 +1222,8 @@ func (h *Handler) forwardUDPDirect(ctx context.Context, conn N.PacketConn, sourc
 		return
 	}
 
-	// 目标地址已是类型化的 Socksaddr，直接转 UDPAddr，无需字符串往返再解析。
-	destUDPAddr := destination.UDPAddr()
-
-	// 3. 转发数据包（双向独立中继）
+	// 目标地址由调用方给出（真实 IP 或 fake-ip 解析结果），直接转 net.Addr。
+	// 转发数据包（双向独立中继）
 	// ★ 必须是两个独立方向的 goroutine 并发转发：
 	//   旧的"读客户端包 → 写上游 → 读一个上游响应 → 回写 → 再等客户端包"
 	//   串行一问一答模型对 QUIC 是致命的：QUIC 握手期服务端会连续回多个
@@ -1153,7 +1253,7 @@ func (h *Handler) forwardUDPDirect(ctx context.Context, conn N.PacketConn, sourc
 		}()
 
 		// 双向转发 + 空闲自毁看门狗。实现细节见 relayUDP 的文档注释。
-		h.relayUDP(ctx, conn, remoteConn, destination, destUDPAddr)
+		h.relayUDP(ctx, conn, remoteConn, destination, destUDPAddr, rewrite)
 	}()
 }
 

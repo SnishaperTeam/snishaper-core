@@ -21,6 +21,8 @@ const (
 	DefaultTLSRFModMinorVer  = true
 	DefaultTLSRFOOB          = false
 	DefaultTLSRFOOBEx        = false
+	DefaultTLSRFHeaderSplit  = false
+	DefaultTLSRFAltRecordVer = false
 )
 
 // ReadInitialTLSRecord reads the first complete TLS record from the connection.
@@ -55,136 +57,25 @@ func FindLastDot(data []byte, sniPos, sniLen int) (offset int, found bool) {
 
 // ParseClientHello extracts the protocol version, SNI location and key-share presence from a ClientHello.
 func ParseClientHello(data []byte) (prtVer []byte, sniPos int, sniLen int, hasKeyShare bool, err error) {
-	const (
-		handshakeHeaderLen       = 4
-		handshakeTypeClientHello = 0x01
-		extTypeSNI               = 0x0000
-		extTypeKeyShare          = 0x0033
-	)
-
-	prtVer = nil
-	sniPos = -1
-	sniLen = 0
-
-	if len(data) < TlsRecordHeaderLen {
-		return prtVer, sniPos, sniLen, false, errors.New("TLS record too short")
+	var l ClientHelloLayout
+	l, err = ParseClientHelloLayout(data)
+	if err != nil {
+		return nil, -1, 0, false, err
 	}
-
-	recordLen := int(binary.BigEndian.Uint16(data[3:5]))
-	if len(data) < TlsRecordHeaderLen+recordLen {
-		return prtVer, sniPos, sniLen, false, errors.New("record length exceeds data size")
+	if l.SniExtStart == -1 {
+		return l.PrtVer, -1, 0, l.HasKeyShare, nil
 	}
-	offset := TlsRecordHeaderLen
-
-	if recordLen < handshakeHeaderLen {
-		return prtVer, sniPos, sniLen, false, errors.New("handshake message too short")
-	}
-	if data[offset] != handshakeTypeClientHello {
-		return prtVer, sniPos, sniLen, false, fmt.Errorf("not a ClientHello handshake (type=%d)", data[offset])
-	}
-	handshakeLen := int(uint32(data[offset+1])<<16 | uint32(data[offset+2])<<8 | uint32(data[offset+3]))
-	if handshakeLen+handshakeHeaderLen > recordLen {
-		return prtVer, sniPos, sniLen, false, errors.New("handshake length exceeds record length")
-	}
-	offset += handshakeHeaderLen
-
-	if handshakeLen < 2+32+1 {
-		return prtVer, sniPos, sniLen, false, errors.New("ClientHello too short for mandatory fields")
-	}
-	prtVer = data[offset : offset+2]
-	offset += 2
-	offset += 32
-	if offset >= len(data) {
-		return prtVer, sniPos, sniLen, false, errors.New("unexpected end after Random")
-	}
-	sessionIDLen := int(data[offset])
-	offset++
-	if offset+sessionIDLen > len(data) {
-		return prtVer, sniPos, sniLen, false, errors.New("session_id length exceeds data")
-	}
-	offset += sessionIDLen
-
-	if offset+2 > len(data) {
-		return prtVer, sniPos, sniLen, false, errors.New("cannot read cipher_suites length")
-	}
-	csLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
-	offset += 2
-	if offset+csLen > len(data) {
-		return prtVer, sniPos, sniLen, false, errors.New("cipher_suites exceed data")
-	}
-	offset += csLen
-
-	if offset >= len(data) {
-		return prtVer, sniPos, sniLen, false, errors.New("cannot read compression_methods length")
-	}
-	compMethodsLen := int(data[offset])
-	offset++
-	if offset+compMethodsLen > len(data) {
-		return prtVer, sniPos, sniLen, false, errors.New("compression_methods exceed data")
-	}
-	offset += compMethodsLen
-
-	if offset+2 > len(data) {
-		return prtVer, sniPos, sniLen, false, nil
-	}
-	extTotalLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
-	offset += 2
-	if offset+extTotalLen > len(data) {
-		return prtVer, sniPos, sniLen, false, errors.New("extensions length exceeds data")
-	}
-	extensionsEnd := offset + extTotalLen
-
-	for offset+4 <= extensionsEnd {
-		extType := binary.BigEndian.Uint16(data[offset : offset+2])
-		extLen := int(binary.BigEndian.Uint16(data[offset+2 : offset+4]))
-		extDataStart := offset + 4
-		extDataEnd := extDataStart + extLen
-
-		if extDataEnd > extensionsEnd {
-			return prtVer, sniPos, sniLen, false, errors.New("extension length exceeds extensions block")
-		}
-
-		if extType == extTypeKeyShare {
-			hasKeyShare = true
-			if sniPos != -1 {
-				return prtVer, sniPos, sniLen, hasKeyShare, nil
-			}
-		}
-
-		if sniPos == -1 && extType == extTypeSNI {
-			if extLen < 2 {
-				return prtVer, sniPos, sniLen, hasKeyShare, errors.New("malformed SNI extension")
-			}
-			listLen := int(binary.BigEndian.Uint16(data[extDataStart : extDataStart+2]))
-			if listLen+2 != extLen {
-				return prtVer, sniPos, sniLen, hasKeyShare, errors.New("SNI list length field mismatch")
-			}
-			cursor := extDataStart + 2
-			if cursor+3 > extDataEnd {
-				return prtVer, sniPos, sniLen, hasKeyShare, errors.New("SNI entry too short")
-			}
-			if data[cursor] != 0 {
-				return prtVer, sniPos, sniLen, hasKeyShare, errors.New("unsupported SNI name type")
-			}
-			nameLen := int(binary.BigEndian.Uint16(data[cursor+1 : cursor+3]))
-			nameStart := cursor + 3
-			nameEnd := nameStart + nameLen
-			if nameEnd > extDataEnd {
-				return prtVer, sniPos, sniLen, hasKeyShare, errors.New("SNI name length exceeds extension")
-			}
-			sniPos = nameStart
-			sniLen = nameLen
-			if hasKeyShare {
-				return prtVer, sniPos, sniLen, hasKeyShare, nil
-			}
-		}
-		offset = extDataEnd
-	}
-	return prtVer, sniPos, sniLen, hasKeyShare, nil
+	return l.PrtVer, l.SniNameAt, l.SniNameLen, l.HasKeyShare, nil
 }
 
 // SendRecords sends the ClientHello split into records and segments with the configured shaping options.
-func SendRecords(conn net.Conn, clientHello []byte, offset, length, records, segments int, oob, oobex, modMinorVer bool, interval time.Duration) error {
+//
+// headerSplit places the first record boundary inside the 4-byte handshake
+// header (first record payload <4 bytes); altRecordVer sends the first record
+// with version 0x0303 and the remaining records with 0x0301. Both are
+// CircumVolve (CCS'26) strategies that re-frame bytes without altering the
+// handshake content, and only apply when records >= 2.
+func SendRecords(conn net.Conn, clientHello []byte, offset, length, records, segments int, oob, oobex, modMinorVer, headerSplit, altRecordVer bool, interval time.Duration) error {
 	if modMinorVer && len(clientHello) >= 3 {
 		clientHello[2] = 0x04
 	}
@@ -236,8 +127,39 @@ func SendRecords(conn net.Conn, clientHello []byte, offset, length, records, seg
 	chunks := make([][]byte, 0, records)
 	cut, _ := FindLastDot(clientHello, offset, length)
 	header := clientHello[:3]
-	splitAndAppend(clientHello[5:cut], header, leftChunks, &chunks)
-	splitAndAppend(clientHello[cut:], header, rightChunks, &chunks)
+	if headerSplit && records >= 2 && len(clientHello) > 8 && cut > 8 {
+		// Header split: the first record ends inside the handshake header,
+		// so the last handshake-length byte opens the second record.
+		chunks = append(chunks, makeRecord(header, clientHello[5:8]))
+		remaining := records - 1
+		if remaining == 1 {
+			chunks = append(chunks, makeRecord(header, clientHello[8:]))
+		} else {
+			restLeft := remaining / 2
+			if restLeft < 1 {
+				restLeft = 1
+			}
+			restRight := remaining - restLeft
+			splitAndAppend(clientHello[8:cut], header, restLeft, &chunks)
+			splitAndAppend(clientHello[cut:], header, restRight, &chunks)
+		}
+	} else {
+		splitAndAppend(clientHello[5:cut], header, leftChunks, &chunks)
+		splitAndAppend(clientHello[cut:], header, rightChunks, &chunks)
+	}
+
+	if altRecordVer && len(chunks) >= 2 {
+		// Per-record version bytes: 0x0303 on the first record, 0x0301 on
+		// the rest. Overrides modMinorVer's single-version mutation.
+		for i := range chunks {
+			chunks[i][1] = 0x03
+			if i == 0 {
+				chunks[i][2] = 0x03
+			} else {
+				chunks[i][2] = 0x01
+			}
+		}
+	}
 
 	merged := make([]byte, 0, records*5+len(clientHello))
 	for _, c := range chunks {

@@ -15,6 +15,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 
 	"github.com/SnishaperTeam/snishaper-core/config"
+	"github.com/SnishaperTeam/snishaper-core/quicrewrite"
 )
 
 // fakeRelayConn 是一个可在测试里喂数据的 N.PacketConn：
@@ -439,6 +440,52 @@ func TestManagerSetUDPRelayBeforeStart(t *testing.T) {
 	}
 	if handler != nil && handler.getUDPRelay() == nil {
 		t.Fatal("SetUDPRelay did not push the relay to the live handler")
+	}
+}
+
+// TestHandlerSetQUICRewriteTogglesHook checks the install/clear contract used
+// by the manager, mirroring the UDP relay contract above.
+func TestHandlerSetQUICRewriteTogglesHook(t *testing.T) {
+	h := NewHandler("127.0.0.1:1", nil, func(string) {})
+	if h.getQUICRewrite() != nil {
+		t.Fatal("a fresh handler must not have a QUIC rewrite hook installed")
+	}
+
+	hook := func(string) (quicrewrite.Strategies, bool) {
+		return quicrewrite.Strategies{ReservedBits: true}, true
+	}
+	h.SetQUICRewrite(hook)
+	if h.getQUICRewrite() == nil {
+		t.Fatal("SetQUICRewrite did not install the hook")
+	}
+
+	h.SetQUICRewrite(nil)
+	if h.getQUICRewrite() != nil {
+		t.Fatal("SetQUICRewrite(nil) did not clear the hook")
+	}
+}
+
+// TestManagerSetQUICRewriteStoresHook pins the manager-side contract: the hook
+// is stored before Start so the data plane picks it up when the handler is
+// created (the same pattern as the UDP relay).
+func TestManagerSetQUICRewriteStoresHook(t *testing.T) {
+	m := newManager(config.Brand{}, nil, func(string) {})
+
+	called := false
+	m.SetQUICRewrite(func(string) (quicrewrite.Strategies, bool) {
+		called = true
+		return quicrewrite.Strategies{}, false
+	})
+
+	m.mu.Lock()
+	hook := m.quicRewrite
+	m.mu.Unlock()
+	if hook == nil {
+		t.Fatal("SetQUICRewrite did not store the hook on the manager")
+	}
+	hook("example.com")
+	if !called {
+		t.Fatal("the stored hook is not the one passed in")
 	}
 }
 

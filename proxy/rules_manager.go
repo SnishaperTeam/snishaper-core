@@ -14,6 +14,7 @@ import (
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
 	"github.com/SnishaperTeam/snishaper-core/internal/atomicfile"
 	"github.com/SnishaperTeam/snishaper-core/log"
+	"github.com/SnishaperTeam/snishaper-core/quicrewrite"
 	"github.com/SnishaperTeam/snishaper-core/subscription"
 )
 
@@ -196,10 +197,21 @@ func (r *RuleManager) matchRuleFor(host, mode, process string) Rule {
 	return rule
 }
 
+// MatchQUICStrategies reports the QUIC Initial rewrite strategies of the rule
+// matching host (consumed by the TUN fake-ip UDP path). ok=false means the
+// host's QUIC must stay untouched: drop the datagram and let the client fall
+// back to TCP, exactly like before the rewrite existed.
+func (r *RuleManager) MatchQUICStrategies(host string) (quicrewrite.Strategies, bool) {
+	rule := r.matchRule(host, "quic")
+	if !rule.QUIC.AnyEnabled() {
+		return quicrewrite.Strategies{}, false
+	}
+	return rule.QUIC.Strategies(), true
+}
+
 // processRuleBonus outranks every domain score class so per-application rules
 // always win over domain rules for their processes.
 const processRuleBonus = 1 << 20
-
 // matchRuleDetailed is the real matching pipeline. matchRule (real traffic)
 // and ExplainMatch (simulated queries) both land here so the explanation can
 // never drift from the engine. process is the client process base name for
@@ -722,6 +734,7 @@ func (rm *RuleManager) buildRules() {
 				NAT64Enabled:       sg.NAT64Enabled,
 				NAT64ProfileID:     sg.NAT64ProfileID,
 				Frag:               sg.Frag,
+			QUIC:               sg.QUIC,
 			}
 			rm.rules = append(rm.rules, rule)
 		}
