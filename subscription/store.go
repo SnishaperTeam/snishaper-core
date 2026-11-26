@@ -243,7 +243,8 @@ func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	return writeFileAtomic(s.path, data, 0o644)
+	// Subscription files carry provider URLs and credentials; owner-only.
+	return writeFileAtomic(s.path, data, 0o600)
 }
 
 func (s *Store) find(id string) *Entry {

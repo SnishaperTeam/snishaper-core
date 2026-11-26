@@ -894,7 +894,17 @@ func (p *ProxyServer) Start() error {
 	}
 
 	listenAddr := p.listenAddr
+	logger := p.logger
 	p.mu.Unlock()
+
+	// The mixed HTTP/SOCKS5 port has no authentication; binding it to a
+	// non-loopback address exposes an open proxy to the local network.
+	// Warn so embedders notice, without forbidding the (legal) choice.
+	if host, _, splitErr := net.SplitHostPort(listenAddr); splitErr == nil {
+		if ip := net.ParseIP(host); host == "" || (ip != nil && !ip.IsLoopback()) {
+			logger.Printf("proxy: WARNING: unauthenticated mixed HTTP/SOCKS5 port listening on non-loopback %s is reachable from the network", listenAddr)
+		}
+	}
 
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
