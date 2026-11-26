@@ -21,6 +21,7 @@ import (
 	"github.com/SnishaperTeam/snishaper-core/config"
 	"github.com/SnishaperTeam/snishaper-core/internal/atomicfile"
 	"github.com/SnishaperTeam/snishaper-core/internal/openutil"
+	"github.com/SnishaperTeam/snishaper-core/log"
 )
 
 // CertManager manages the embedding application's CA certificate and key used
@@ -38,6 +39,9 @@ type CertManager struct {
 
 	// brand 决定 CA 主题与信任库中"哪些证书属于本应用"的判定。
 	brand config.Brand
+
+	// logger receives the corrupt-CA recovery warning; Nop unless injected.
+	logger log.Logger
 }
 
 // NewCertManager creates a CertManager reading and writing the CA at the given
@@ -55,6 +59,15 @@ func NewCertManagerFor(brand config.Brand, caPath, keyPath string) *CertManager 
 		caPath:  caPath,
 		keyPath: keyPath,
 		brand:   brand.Resolve(),
+		logger:  log.Nop,
+	}
+}
+
+// SetLogger injects the logger that receives the corrupt-CA recovery
+// warning; without it the regeneration happens silently.
+func (cm *CertManager) SetLogger(l log.Logger) {
+	if l != nil {
+		cm.logger = l
 	}
 }
 
@@ -397,14 +410,28 @@ func (cm *CertManager) ExportCert() ([]byte, error) {
 
 // InitCertManager loads or creates the CA in certDir and returns a ready
 // CertManager for the reference product.
-func InitCertManager(certDir string) (*CertManager, error) {
-	return InitCertManagerFor(config.Brand{}, certDir)
+func InitCertManager(certDir string, opts ...Option) (*CertManager, error) {
+	return InitCertManagerFor(config.Brand{}, certDir, opts...)
+}
+
+// Option customises CertManager initialisation.
+type Option func(*CertManager)
+
+// WithLogger injects the logger that receives the corrupt-CA recovery
+// warning emitted during InitCertManagerFor; without it the CA
+// regeneration after a load failure happens silently.
+func WithLogger(l log.Logger) Option {
+	return func(cm *CertManager) {
+		if l != nil {
+			cm.logger = l
+		}
+	}
 }
 
 // InitCertManagerFor loads or creates the CA in certDir for the given brand.
 // The brand decides the CA subject, so each application installs a
 // recognisably-named root instead of sharing (and uninstalling) one another's.
-func InitCertManagerFor(brand config.Brand, certDir string) (*CertManager, error) {
+func InitCertManagerFor(brand config.Brand, certDir string, opts ...Option) (*CertManager, error) {
 	os.MkdirAll(certDir, 0755)
 
 	cm := NewCertManagerFor(
@@ -412,10 +439,16 @@ func InitCertManagerFor(brand config.Brand, certDir string) (*CertManager, error
 		filepath.Join(certDir, "ca.crt"),
 		filepath.Join(certDir, "ca.key"),
 	)
+	for _, opt := range opts {
+		if opt != nil {
+			opt(cm)
+		}
+	}
 
 	if err := cm.LoadCA(); err != nil {
 		// Keep the unreadable files for forensics instead of deleting the old
 		// trust anchor: renaming preserves the auto-recovery without data loss.
+		cm.logger.Printf("certmanager: WARNING: CA load failed (%v); old files preserved as .corrupt.bak and a new CA was generated — any certificates issued by the previous CA stop validating", err)
 		_ = os.Rename(cm.caPath, cm.caPath+".corrupt.bak")
 		_ = os.Rename(cm.keyPath, cm.keyPath+".corrupt.bak")
 		if genErr := cm.GenerateCA(); genErr != nil {
