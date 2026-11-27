@@ -211,13 +211,17 @@ func (p *CloudflarePool) GetAllIPs() []string {
 }
 
 // GetAllIPsWithStats returns every pool IP together with its statistics.
+//
+// 返回的是快照拷贝：调用方在锁外读取这些结构体（如 JSON 序列化），
+// 而健康检查协程会并发更新原对象的字段，直接共享指针会构成数据竞争。
 func (p *CloudflarePool) GetAllIPsWithStats() []*IPStats {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	stats := make([]*IPStats, 0, len(p.allIPs))
 	for _, s := range p.allIPs {
-		stats = append(stats, s)
+		cp := *s
+		stats = append(stats, &cp)
 	}
 
 	sort.Slice(stats, func(i, j int) bool {
