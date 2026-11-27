@@ -4,7 +4,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.27%2B-00ADD8?style=flat&logo=go)](https://golang.org) [![License](https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat&logo=open-source-initiative)](LICENSE) [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/SnishaperTeam/snishaper-core/build.yml?style=flat&logo=githubactions&label=CI)](https://github.com/SnishaperTeam/snishaper-core/actions) [![GitHub last commit](https://img.shields.io/github/last-commit/SnishaperTeam/snishaper-core?style=flat&logo=git&label=last%20commit)](https://github.com/SnishaperTeam/snishaper-core/commits/main) [![GitHub contributors](https://img.shields.io/github/contributors/SnishaperTeam/snishaper-core?style=flat&label=contributors)](https://github.com/SnishaperTeam/snishaper-core/graphs/contributors)
 
-**snishaper-core** is the core proxy library shared by [SniShaper](https://github.com/SnishaperTeam/SniShaper) and [FlowWeaver](https://github.com/SnishaperTeam/FlowWeaver), providing an embeddable, testable Go data plane for hostile network environments through a **hybrid-port proxy**, **rule engine with MITM**, **ECH injection**, **TLS fragmentation**, **DoH resolution**, and a **TUN dataplane**.
+**snishaper-core** is the core proxy library shared by [SniShaper](https://github.com/SnishaperTeam/SniShaper) (including its Android client [Snishaper-Droid](https://github.com/SnishaperTeam/Snishaper-Droid)) and [FlowWeaver](https://github.com/SnishaperTeam/FlowWeaver), providing an embeddable, testable Go data plane for hostile network environments through a **hybrid-port proxy**, **rule engine with MITM**, **ECH injection**, **TLS fragmentation**, **DoH resolution**, and a **TUN dataplane**.
 
 The library has zero global mutable state: silent by default, no environment reads, no `os.Exit` — every behavior is injected via functional options.
 
@@ -12,7 +12,7 @@ The library has zero global mutable state: silent by default, no environment rea
 
 ## Downstream projects
 
-This library is embedded by two applications; all three are maintained in parallel:
+This library is embedded by the applications below; all are maintained in parallel:
 
 | | [SniShaper](https://github.com/SnishaperTeam/SniShaper) | [FlowWeaver](https://github.com/SnishaperTeam/FlowWeaver) | snishaper-core (this repo) |
 |---|---|---|---|
@@ -21,6 +21,8 @@ This library is embedded by two applications; all three are maintained in parall
 | Audience | End users | End users | Go developers |
 
 Both applications depend on this library directly; the product name is injected via `config.Brand` (SniShaper uses the default `SniShaper`, FlowWeaver injects `FlowWeaver`). Rule file formats and configuration semantics stay consistent across all three.
+
+Mobile builds on it as well: SniShaper's Android client [Snishaper-Droid](https://github.com/SnishaperTeam/Snishaper-Droid) compiles this library into an AAR via gomobile, reusing the same engine on Android.
 
 ---
 

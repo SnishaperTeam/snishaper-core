@@ -4,7 +4,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go最低版本-1.27%2B-00ADD8?style=flat&logo=go)](https://golang.org) [![License](https://img.shields.io/badge/许可证-AGPL--3.0-blue?style=flat&logo=open-source-initiative)](LICENSE) [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/SnishaperTeam/snishaper-core/build.yml?style=flat&logo=githubactions&label=持续集成)](https://github.com/SnishaperTeam/snishaper-core/actions) [![GitHub last commit](https://img.shields.io/github/last-commit/SnishaperTeam/snishaper-core?style=flat&logo=git&label=最后提交)](https://github.com/SnishaperTeam/snishaper-core/commits/main) [![GitHub contributors](https://img.shields.io/github/contributors/SnishaperTeam/snishaper-core?style=flat&label=总贡献者)](https://github.com/SnishaperTeam/snishaper-core/graphs/contributors)
 
-**snishaper-core** 是 [SniShaper](https://github.com/SnishaperTeam/SniShaper) 与 [FlowWeaver](https://github.com/SnishaperTeam/FlowWeaver) 共用的核心代理库，通过 **混合端口代理**、**规则引擎与 MITM**、**ECH 注入**、**TLS 分片**、**DoH 解析** 与 **TUN 数据面** 等能力，为复杂网络环境提供可嵌入、可测试的 Go 数据面。
+**snishaper-core** 是 [SniShaper](https://github.com/SnishaperTeam/SniShaper)（含其 Android 客户端 [Snishaper-Droid](https://github.com/SnishaperTeam/Snishaper-Droid)）与 [FlowWeaver](https://github.com/SnishaperTeam/FlowWeaver) 共用的核心代理库，通过 **混合端口代理**、**规则引擎与 MITM**、**ECH 注入**、**TLS 分片**、**DoH 解析** 与 **TUN 数据面** 等能力，为复杂网络环境提供可嵌入、可测试的 Go 数据面。
 
 本库零全局可变状态：默认零日志、不读环境变量、不调用 `os.Exit`，全部行为通过 functional options 注入。
 
@@ -12,7 +12,7 @@
 
 ## 下游项目
 
-本库被以下两个应用嵌入，三者**并行维护**：
+本库被以下应用嵌入，**并行维护**：
 
 | | [SniShaper](https://github.com/SnishaperTeam/SniShaper) | [FlowWeaver](https://github.com/SnishaperTeam/FlowWeaver) | snishaper-core（本仓库） |
 |---|---|---|---|
@@ -21,6 +21,8 @@
 | 面向对象 | 最终用户 | 最终用户 | Go 开发者 |
 
 两个应用都直接依赖本库，产品名经 `config.Brand` 注入（SniShaper 使用默认值 `SniShaper`，FlowWeaver 注入 `FlowWeaver`）；规则文件格式与配置语义在三者间保持一致。
+
+移动端同样基于本库：SniShaper 的 Android 客户端 [Snishaper-Droid](https://github.com/SnishaperTeam/Snishaper-Droid) 经 gomobile 把本库编译为 AAR，在 Android 上复用同一引擎。
 
 ---
 
