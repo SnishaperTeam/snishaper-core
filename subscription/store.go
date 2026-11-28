@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/SnishaperTeam/snishaper-core/config"
-	"github.com/SnishaperTeam/snishaper-core/internal/atomicfile"
+	"github.com/SnishaperTeam/snishaper-core/atomicfile"
 )
 
 // DefaultSubscriptionID is the built-in entry that keeps the shipped rules and

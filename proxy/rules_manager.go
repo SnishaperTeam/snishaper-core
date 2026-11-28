@@ -12,7 +12,7 @@ import (
 
 	"github.com/SnishaperTeam/snishaper-core/config"
 	"github.com/SnishaperTeam/snishaper-core/dohresolver"
-	"github.com/SnishaperTeam/snishaper-core/internal/atomicfile"
+	"github.com/SnishaperTeam/snishaper-core/atomicfile"
 	"github.com/SnishaperTeam/snishaper-core/log"
 	"github.com/SnishaperTeam/snishaper-core/quicrewrite"
 	"github.com/SnishaperTeam/snishaper-core/subscription"

@@ -32,10 +32,12 @@ DoH 解析、ECH/TLS 分片、GFWList 分流、TUN（sing-tun）、网卡选择�
 | `evolution/` | SniShaper `evolution/` | 规则演化：多模式探测域名可达性、生成临时站点分组规则 |
 | `config/` | 原 `common` 中的共享类型 | `CertVerifyConfig`、`MapNAT64Addr`、`HalfClose`、`VerifyChainOnly` |
 | `log/` | 新增 | `Logger` 接口 + `Nop`/`Std`/`Func` |
-| `internal/openutil/` | 原 `common/open_*.go` | shell 打开/资源管理器定位（certmanager 内部用） |
+| `openutil/` | 原 `common/open_*.go` | shell 打开/资源管理器定位 |
+| `atomicfile/` | 审计修复新增 | 原子写文件（临时文件 + rename，certmanager/proxy/subscription 共用） |
 
 依赖方向：`singtun → proxy → dohresolver → netiface`，`config` 与 `log`
-为叶子包，无循环依赖。原 `core/coreRuntime` 是装配代码，留在原项目。
+为叶子包，无循环依赖。`openutil` 与 `atomicfile` 亦为独立叶子包，
+均已从 `internal/` 移出公开导出。原 `core/coreRuntime` 是装配代码，留在原项目。
 
 ## 去全局化决策
 

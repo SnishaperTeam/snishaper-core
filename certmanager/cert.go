@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/SnishaperTeam/snishaper-core/config"
-	"github.com/SnishaperTeam/snishaper-core/internal/atomicfile"
-	"github.com/SnishaperTeam/snishaper-core/internal/openutil"
+	"github.com/SnishaperTeam/snishaper-core/atomicfile"
+	"github.com/SnishaperTeam/snishaper-core/openutil"
 	"github.com/SnishaperTeam/snishaper-core/log"
 )
 
