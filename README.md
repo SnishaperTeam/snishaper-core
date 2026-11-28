@@ -88,6 +88,8 @@ go run ./examples/basic 8080
 ## 文档
 
 - **[docs/DESIGN.md](docs/DESIGN.md)** — 库设计、包边界与去全局化约定。
+- **[docs/api/api.md](docs/api/api.md)** — 全量中文 API 参考（按包分页，覆盖所有导出标识符）。
+- **[在线 API 文档](https://jetcpp.ccwu.cc/api/)** — 与仓库内 docs/api 同步的网页版（VitePress）。
 - **[examples/basic](examples/basic)** — 最小嵌入示例。
 - **[SniShaper Wiki](https://github.com/SnishaperTeam/SniShaper/wiki)** — 核心模式、规则自定义等应用层文档。
 - **[FlowWeaver Wiki](https://github.com/SnishaperTeam/FlowWeaver/wiki)** — 订阅导入、节点协议与客户端侧文档。
