@@ -89,7 +89,7 @@ go run ./examples/basic 8080
 
 - **[docs/DESIGN.md](docs/DESIGN.md)** — library design, package boundaries and de-globalization conventions.
 - **[docs/api/api.md](docs/api/api.md)** — full Chinese API reference (per-package pages, covers every exported identifier).
-- **[Online API docs](https://jetcpp.ccwu.cc/api/)** — web version of docs/api, kept in sync (VitePress).
+- **[Online API docs](https://jetcpp.ccwu.cc/project/snishaper-core/api/)** — web version of docs/api, kept in sync (VitePress).
 - **[examples/basic](examples/basic)** — minimal embedder sample.
 - **[SniShaper Wiki](https://github.com/SnishaperTeam/SniShaper/wiki)** — core modes, custom rules and other app-level docs.
 - **[FlowWeaver Wiki](https://github.com/SnishaperTeam/FlowWeaver/wiki)** — subscription import, node protocols and client-side docs.

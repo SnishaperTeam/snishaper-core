@@ -89,7 +89,7 @@ go run ./examples/basic 8080
 
 - **[docs/DESIGN.md](docs/DESIGN.md)** — проектирование библиотеки, границы пакетов и соглашения деглобализации.
 - **[docs/api/api.md](docs/api/api.md)** — полный API-справочник на китайском языке (страницы по пакетам, покрывает все экспортируемые идентификаторы).
-- **[Онлайн API-документация](https://jetcpp.ccwu.cc/api/)** — веб-версия docs/api, синхронизируется с репозиторием (VitePress).
+- **[Онлайн API-документация](https://jetcpp.ccwu.cc/project/snishaper-core/api/)** — веб-версия docs/api, синхронизируется с репозиторием (VitePress).
 - **[examples/basic](examples/basic)** — минимальный пример встраивания.
 - **[SniShaper Wiki](https://github.com/SnishaperTeam/SniShaper/wiki)** — основные режимы, кастомные правила и другая документация прикладного уровня.
 - **[FlowWeaver Wiki](https://github.com/SnishaperTeam/FlowWeaver/wiki)** — импорт подписок, протоколы узлов и документация клиентской части.
