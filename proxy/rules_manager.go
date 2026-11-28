@@ -43,9 +43,12 @@ type RuleManager struct {
 	listenAddress        string
 	echProfiles          []ECHProfile
 	nat64Profiles        []NAT64Profile
-	autoRouter           *AutoRouter
-	autoRoutingConfig    AutoRoutingConfig
-	mu                   sync.RWMutex
+	autoRouter        *AutoRouter
+	autoRoutingConfig AutoRoutingConfig
+	mu                sync.RWMutex
+	// ruleIdx 在 SetRules 时与 rules 一同重建，加速 matchRuleDetailed 的
+	// 热路径（详见 ruleIndex 注释）。collect 路径（ExplainMatch）不走索引。
+	ruleIdx *ruleIndex
 	routeEventCallback   func(domain, mode string)
 	onConfigSaved        func()
 	language             string
@@ -149,10 +152,110 @@ type RulesConfig struct {
 
 // DNSNode defines a DoH upstream with optional SNI obfuscation.
 // It reuses the same dial-level concepts as proxy rules (SNI spoofing, ECH, QUIC, static IPs).
+// SetRules replaces the manual rule set. The slice is stored as-is: callers
+// must not mutate it afterwards — matchRuleDetailed reads it under the read
+// lock, and the domain index built here would go stale. Build a fresh slice
+// and call SetRules again instead.
 func (r *RuleManager) SetRules(rules []Rule) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rules = rules
+	r.ruleIdx = buildRuleIndex(rules)
+}
+
+// ruleIndex accelerates the hot match path: domain-shaped patterns are
+// bucketed by their normalized domain, so a query walks the host's label
+// suffixes and only inspects rules that can actually match, instead of
+// scanning the whole rule slice per request. Patterns that can match
+// arbitrary hosts (~regex, *keyword*, "base.*" tails, empty or "*" domains)
+// stay in the linear scan list. domainMatchScore remains the single source
+// of truth for scoring: the index only preselects candidates, so an
+// over-inclusive bucket cannot change results — only an under-inclusive one
+// could, hence the conservative classification in indexDomainKey.
+type ruleIndex struct {
+	// byDomain maps a normalized pattern domain to the indices of rules whose
+	// pattern can only match hosts equal to or under that domain.
+	byDomain map[string][]int
+	// scan holds indices of patterns that can match arbitrary hosts and are
+	// evaluated on every query (process rules with empty/"*" domains live
+	// here too; their decision never depends on the host).
+	scan []int
+	// hasProcessRules mirrors HasProcessRules, precomputed so the per-request
+	// process-lookup gate does not scan the rule slice.
+	hasProcessRules bool
+}
+
+// buildRuleIndex classifies each rule's domain pattern into a domain bucket
+// or the linear scan list. Rules are keyed by position; r.rules must not be
+// reordered or mutated while an index built from it is live.
+func buildRuleIndex(rules []Rule) *ruleIndex {
+	idx := &ruleIndex{byDomain: make(map[string][]int, len(rules))}
+	for i, rule := range rules {
+		if rule.Enabled && rule.Process != "" {
+			idx.hasProcessRules = true
+		}
+		if key, ok := indexDomainKey(rule.Domain); ok {
+			idx.byDomain[key] = append(idx.byDomain[key], i)
+		} else {
+			idx.scan = append(idx.scan, i)
+		}
+	}
+	return idx
+}
+
+// indexDomainKey classifies a rule domain pattern. ok=true means the pattern
+// can only match hosts equal to or under key, applying the same trims
+// domainMatchScore applies. Anything that can match an arbitrary host —
+// regex, keyword, ".*" tails — or that keeps a "*" after trimming returns
+// ok=false and stays in the linear scan where domainMatchScore arbitrates.
+func indexDomainKey(domain string) (string, bool) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" || domain == "*" || strings.HasPrefix(domain, "~") {
+		return "", false
+	}
+	if len(domain) > 2 && strings.HasPrefix(domain, "*") && strings.HasSuffix(domain, "*") {
+		return "", false
+	}
+	domain = strings.TrimPrefix(domain, "*.")
+	domain = strings.TrimSuffix(domain, "$")
+	if domain == "" || strings.Contains(domain, "*") {
+		return "", false
+	}
+	return domain, true
+}
+
+// considerRule evaluates one rule candidate against host/process and updates
+// the running best. It factors the per-candidate body of the match loops so
+// the indexed path and the linear path share identical semantics; ties prefer
+// the lowest rule index, matching the linear scan's first-wins behavior.
+// Callers hold rm.mu (read or write).
+func (r *RuleManager) considerRule(rule Rule, ruleIdx int, host, process string, best *Rule, bestScore, bestIdx *int) {
+	if !rule.Enabled {
+		return
+	}
+	score := domainMatchScore(host, rule.Domain, &r.domainRegexCache)
+	if rule.Process != "" {
+		// 进程规则：进程未知/不支持/不匹配时一律不参与（fail closed）。
+		// 进程规则的域名可为空（"*" 同义），表示该进程的所有目标。
+		if process == "" || !processNameInList(process, rule.Process) {
+			return
+		}
+		if score < 0 && (rule.Domain == "" || rule.Domain == "*") {
+			score = 0
+		}
+		if score < 0 {
+			return
+		}
+		score += processRuleBonus
+	}
+	if score < 0 {
+		return
+	}
+	if score > *bestScore || (score == *bestScore && ruleIdx < *bestIdx) {
+		*best = rule
+		*bestScore = score
+		*bestIdx = ruleIdx
+	}
 }
 
 // processNameInList reports whether the process base name appears in the
@@ -175,6 +278,9 @@ func processNameInList(process, list string) bool {
 func (r *RuleManager) HasProcessRules() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if r.ruleIdx != nil {
+		return r.ruleIdx.hasProcessRules
+	}
 	for _, rule := range r.rules {
 		if rule.Enabled && rule.Process != "" {
 			return true
@@ -229,40 +335,63 @@ func (r *RuleManager) matchRuleDetailed(host, mode, process string, collect, emi
 	r.mu.RLock()
 	best := Rule{}
 	bestScore := -1
+	bestIdx := -1
 	var candidates []MatchCandidate
-	for _, rule := range r.rules {
-		if !rule.Enabled {
-			continue
+	if !collect && r.ruleIdx != nil {
+		// 索引热路径：按 host 的标签后缀逐级查桶，再过一遍可匹配任意
+		// host 的扫描集，候选数与规则总量解耦（bench 见 BenchmarkRuleMatch）。
+		idx := r.ruleIdx
+		suffix := host
+		for {
+			for _, i := range idx.byDomain[suffix] {
+				r.considerRule(r.rules[i], i, host, process, &best, &bestScore, &bestIdx)
+			}
+			dot := strings.IndexByte(suffix, '.')
+			if dot < 0 {
+				break
+			}
+			suffix = suffix[dot+1:]
 		}
+		for _, i := range idx.scan {
+			r.considerRule(r.rules[i], i, host, process, &best, &bestScore, &bestIdx)
+		}
+	} else {
+		// 线性路径（ExplainMatch 的 collect，或索引尚未构建）：保持候选
+		// 按规则顺序收集，保证解释输出与历史行为一致。
+		for _, rule := range r.rules {
+			if !rule.Enabled {
+				continue
+			}
 
-		score := domainMatchScore(host, rule.Domain, &r.domainRegexCache)
-		if rule.Process != "" {
-			// 进程规则：进程未知/不支持/不匹配时一律不参与（fail closed）。
-			// 进程规则的域名可为空（"*" 同义），表示该进程的所有目标。
-			if process == "" || !processNameInList(process, rule.Process) {
-				continue
+			score := domainMatchScore(host, rule.Domain, &r.domainRegexCache)
+			if rule.Process != "" {
+				// 进程规则：进程未知/不支持/不匹配时一律不参与（fail closed）。
+				// 进程规则的域名可为空（"*" 同义），表示该进程的所有目标。
+				if process == "" || !processNameInList(process, rule.Process) {
+					continue
+				}
+				if score < 0 && (rule.Domain == "" || rule.Domain == "*") {
+					score = 0
+				}
+				if score < 0 {
+					continue
+				}
+				score += processRuleBonus
 			}
-			if score < 0 && (rule.Domain == "" || rule.Domain == "*") {
-				score = 0
-			}
-			if score < 0 {
-				continue
-			}
-			score += processRuleBonus
-		}
-		if score >= 0 {
-			if collect {
-				candidates = append(candidates, MatchCandidate{
-					Domain:  rule.Domain,
-					SiteID:  rule.SiteID,
-					Mode:    rule.Mode,
-					Score:   score,
-					Process: rule.Process,
-				})
-			}
-			if score > bestScore {
-				best = rule
-				bestScore = score
+			if score >= 0 {
+				if collect {
+					candidates = append(candidates, MatchCandidate{
+						Domain:  rule.Domain,
+						SiteID:  rule.SiteID,
+						Mode:    rule.Mode,
+						Score:   score,
+						Process: rule.Process,
+					})
+				}
+				if score > bestScore {
+					best = rule
+					bestScore = score
+				}
 			}
 		}
 	}
